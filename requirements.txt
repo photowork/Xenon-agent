@@ -1,0 +1,32 @@
+openai>=1.0.0
+tiktoken>=0.5.0
+watchdog>=3.0.0
+PyPDF2>=3.0.0
+reportlab>=4.0.0
+python-docx>=0.8.11
+docx2pdf>=0.1.8
+pdf2image>=1.16.0
+pymupdf>=1.23.0
+matplotlib>=3.7.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+paramiko>=3.0.0
+Pillow>=10.0.0
+opencv-python>=4.8.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+duckduckgo-search>=8.0.0
+aiohttp>=3.8.0
+ollama>=0.6.0
+faiss-cpu>=1.7.0
+numpy>=1.24.0
+playwright>=1.40.0
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+
+# 以下为补充依赖
+moviepy>=1.0.0
+mammoth>=1.4.0
+psutil>=5.9.0
+pywin32>=300          # Windows only: required for COM operations

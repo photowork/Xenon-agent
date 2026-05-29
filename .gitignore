@@ -1,0 +1,63 @@
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# === Virtual Environment ===
+venv/
+.venv/
+
+# === IDE & Tools ===
+.agent_history/
+.workbuddy/
+.vscode/
+.idea/
+
+# === Runtime Data — not part of the program ===
+Tasks/execution_journal.jsonl
+Memory/tool_results/
+Memory/auto_summary/
+Memory/execution_logs/
+Memory/memory_Write/
+Memory/meta_experience/
+Memory/soul_thoughts/
+Memory/vector_db/
+Memory/credentials.json
+Memory/*.json
+Context/
+debug_logs/
+work/
+tests/.tmp_*/
+
+# === Cache ===
+.pytest_cache/
+*.tmp
+tests/*/
+tests/__pycache__/
+
+# === Environment ===
+.env
+*.env.local
+
+# === OS ===
+Thumbs.db
+.DS_Store
+
+# === Large Generated Files ===
+AI_code/
+
+# === Sensitive Credentials — DO NOT COMMIT ===
+deepseekconfig.py
+Tools/vision_tool.py
+Tools/*/credentials.json
+Tools/tts_handler/qwen3-tts-flash.txt
+Tools/tts_handler/tts_config.json
+Tools/mail_handler/mail_config.json
+Tools/ssh_handler/ssh_connections.json
+webui/sessions/
+config/*.json
