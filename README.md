@@ -4,6 +4,8 @@
 >
 > An AI agent system based on recursive dialogue and dynamic tool orchestration, featuring code editor, browser, speech, and video modules, along with a complete WebUI and task orchestration engine.
 
+![Xenon 运行界面](assets/screenshots/xenon.jpg)
+
 ## 功能特性
 
 - **🧠 递归对话架构** — 对话轮次管理、上下文裁剪与压缩、记忆持久化
