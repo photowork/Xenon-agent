@@ -1423,6 +1423,8 @@
         let currentStatusPollInFlight = false;
         let availableModels = [];
         let currentModel = null;
+        let shouldAutoScrollMessages = true;
+        const AUTO_SCROLL_BOTTOM_THRESHOLD = 80;
 
         const elements = {
             sidebar: document.getElementById('sidebar'),
@@ -1476,7 +1478,7 @@
                         clearStatusPoller();
                         resetStreamingState(requestId);
                         if (currentSessionId === sessionId) {
-                            await loadMessages();
+                            await loadMessages({ forceScroll: shouldAutoScrollMessages });
                             await loadSessions({ selectLatest: false });
                         }
                     }
@@ -1547,7 +1549,7 @@
                 if (currentSessionId === sessionIdForSwitch) {
                     currentModel = previousModel;
                     syncModelSelect();
-                    await loadMessages();
+                    await loadMessages({ forceScroll: shouldAutoScrollMessages });
                 }
             }
         }
@@ -1698,7 +1700,17 @@
             }
         }
 
-        async function loadMessages() {
+        function isMessagesNearBottom() {
+            const container = elements.messagesContainer;
+            return container.scrollHeight - container.scrollTop - container.clientHeight <= AUTO_SCROLL_BOTTOM_THRESHOLD;
+        }
+
+        function updateAutoScrollState() {
+            shouldAutoScrollMessages = isMessagesNearBottom();
+        }
+
+        async function loadMessages(options = {}) {
+            const { forceScroll = true } = options;
             if (!currentSessionId) return;
             const sessionIdForLoad = currentSessionId;
 
@@ -1709,7 +1721,7 @@
                 ]);
                 const data = await response.json();
                 if (currentSessionId !== sessionIdForLoad) return;
-                renderMessages(data.messages);
+                renderMessages(data.messages, { forceScroll });
                 
                 const sessionData = await sessionResponse.json();
                 if (currentSessionId !== sessionIdForLoad) return;
@@ -1721,7 +1733,9 @@
             }
         }
 
-        function renderMessages(messages) {
+        function renderMessages(messages, options = {}) {
+            const { forceScroll = true } = options;
+            const previousScrollTop = elements.messagesContainer.scrollTop;
             if (messages.length === 0) {
                 elements.messagesContainer.innerHTML = `
                     <div class="empty-state"></div>
@@ -1735,7 +1749,12 @@
                 appendMessage(msg);
             });
 
-            scrollToBottom();
+            if (forceScroll) {
+                scrollToBottom({ force: true });
+            } else {
+                elements.messagesContainer.scrollTop = previousScrollTop;
+                updateAutoScrollState();
+            }
         }
 
         function appendMessage(msg) {
@@ -1789,14 +1808,14 @@
                 type: 'content',
                 content: message
             });
-            scrollToBottom();
+            scrollToBottom({ force: true });
 
             const typingIndicator = document.createElement('div');
             typingIndicator.className = 'typing-indicator';
             typingIndicator.id = 'typing-indicator';
             typingIndicator.innerHTML = '<span></span><span></span><span></span>';
             elements.messagesContainer.appendChild(typingIndicator);
-            scrollToBottom();
+            scrollToBottom({ force: true });
 
             let currentThinkingEl = null;
             let currentContentEl = null;
@@ -1835,7 +1854,7 @@
                 receivedDoneEvent = true;
                 resetStreamingState(requestId);
                 if (currentSessionId === sessionIdForRequest) {
-                    await loadMessages();
+                    await loadMessages({ forceScroll: shouldAutoScrollMessages });
                     await loadSessions({ selectLatest: false });
                 }
             };
@@ -2106,8 +2125,13 @@
             }
         }
 
-        function scrollToBottom() {
+        function scrollToBottom(options = {}) {
+            const { force = false } = options;
+            if (!force && !shouldAutoScrollMessages) {
+                return;
+            }
             elements.messagesContainer.scrollTop = elements.messagesContainer.scrollHeight;
+            shouldAutoScrollMessages = true;
         }
 
         function escapeHtml(text) {
@@ -2130,6 +2154,7 @@
         elements.newChatBtn.addEventListener('click', () => createSession());
         elements.sendBtn.addEventListener('click', handleSendButtonClick);
         elements.modelSelect.addEventListener('change', (event) => updateSessionModel(event.target.value));
+        elements.messagesContainer.addEventListener('scroll', updateAutoScrollState);
         elements.inputBox.addEventListener('input', autoResizeTextarea);
         elements.inputBox.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
