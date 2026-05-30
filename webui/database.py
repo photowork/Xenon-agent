@@ -30,9 +30,6 @@ class Database:
     def _safe_read_json(self, filepath: Path):
         """安全读取 JSON 文件的上下文管理器"""
         lock = self._get_file_lock(str(filepath))
-        with self._lock:  # 全局锁保护文件锁字典
-            pass
-        
         with lock:
             try:
                 with open(filepath, 'r', encoding='utf-8') as f:
@@ -47,9 +44,6 @@ class Database:
     def _safe_write_json(self, filepath: Path):
         """安全写入 JSON 文件的上下文管理器"""
         lock = self._get_file_lock(str(filepath))
-        with self._lock:
-            pass
-        
         with lock:
             # 先读取现有数据
             data = {}
@@ -187,6 +181,11 @@ class Database:
                 index[session_id]["updated_at"] = data["updated_at"]
 
     def update_session_theme(self, session_id: str, theme: str):
+        """更新会话主题显示名，同时将 title 也设为同一值（"主题即标题"设计）。
+
+        注意：调用此方法会覆盖原有的 title。如需单独修改标题，请使用
+        update_session_title()。
+        """
         session_path = self._get_session_path(session_id)
         with self._safe_write_json(session_path) as data:
             if not data:
@@ -261,6 +260,16 @@ class Database:
         return session.get("full_context") or session.get("context", [])
     
     def save_context(self, session_id: str, context: List[Dict[str, Any]]):
+        """[已弃用] 请使用 save_session_state() 替代。
+
+        保留以兼容旧调用，但当前 webui 中所有上下文持久化都通过
+        save_session_state() 完成。
+        """
+        import warnings
+        warnings.warn(
+            "save_context is deprecated, use save_session_state instead",
+            DeprecationWarning, stacklevel=2,
+        )
         session_path = self._get_session_path(session_id)
         with self._safe_write_json(session_path) as data:
             if not data:
@@ -281,18 +290,28 @@ class Database:
         context: List[Dict[str, Any]],
         full_context: Optional[List[Dict[str, Any]]] = None
     ):
+        """Save session context and full_context, then update index timestamp/count.
+
+        Writes index FIRST so that if session write fails, index inconsistency
+        can be repaired by rebuilding from session files (not vice versa).
+        """
         session_path = self._get_session_path(session_id)
+        now = datetime.now().isoformat()
+        message_count = len(full_context if full_context is not None else context)
+
+        # 先写索引（派生数据，失败时影响较小，可从 session 文件重建）
+        with self._safe_write_json(self.base_path / "sessions_index.json") as index:
+            if session_id in index:
+                index[session_id]["updated_at"] = now
+                index[session_id]["message_count"] = message_count
+
+        # 再写 session 数据（主数据）
         with self._safe_write_json(session_path) as data:
             if not data:
                 return
             data["context"] = context
             data["full_context"] = full_context if full_context is not None else data.get("full_context", [])
-            data["updated_at"] = datetime.now().isoformat()
-
-        with self._safe_write_json(self.base_path / "sessions_index.json") as index:
-            if session_id in index:
-                index[session_id]["updated_at"] = data["updated_at"]
-                index[session_id]["message_count"] = len(data.get("full_context") or data.get("context", []))
+            data["updated_at"] = now
     
     def add_message(
         self,

@@ -37,6 +37,13 @@ from xenon_core.runtime_health import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# 确保 stderr 使用 UTF-8 编码，避免 Windows 下中文日志乱码
+try:
+    sys.stderr.reconfigure(encoding='utf-8')
+    sys.stdout.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
 FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 
@@ -149,9 +156,20 @@ class ThreadSafeDict:
         with self._lock:
             return list(self._dict.keys())
     
-    def get_copy(self, key):
+    def get_ref(self, key):
+        """返回 key 对应值的原始引用（非副本），修改返回值会影响共享数据。
+        
+        如需安全副本请使用 get_copy(key) 或调用方自行 copy.deepcopy。
+        """
         with self._lock:
             return self._dict.get(key)
+
+    def get_copy(self, key):
+        """返回 key 对应值的深拷贝，修改返回值不影响共享数据。"""
+        import copy
+        with self._lock:
+            value = self._dict.get(key)
+            return copy.deepcopy(value) if value is not None else None
 
     def get_or_setdefault(self, key, factory):
         with self._lock:
@@ -201,7 +219,18 @@ def has_active_session_stream(session_id: str) -> bool:
     )
 
 
-def interrupt_session_stream(session_id: str, *, discard_agent: bool = False) -> None:
+def wait_for_session_worker(session_id: str, timeout: Optional[float] = None, agent: Any = None) -> bool:
+    agent = agent if agent is not None else agent_instances.get(session_id)
+    if agent is None or not hasattr(agent, "wait_for_worker"):
+        return not has_pending_session_worker(session_id, agent)
+    try:
+        return bool(agent.wait_for_worker(timeout))
+    except Exception as error:
+        logger.warning("Error waiting for agent worker for %s: %s", session_id, error)
+        return False
+
+
+def interrupt_session_stream(session_id: str, *, discard_agent: bool = False) -> bool:
     active_streams.delete(session_id)
     running_streams.delete(session_id)
 
@@ -212,9 +241,26 @@ def interrupt_session_stream(session_id: str, *, discard_agent: bool = False) ->
         except Exception as error:
             logger.warning("Error interrupting agent for %s: %s", session_id, error)
 
+    stopped = wait_for_session_worker(session_id, agent=agent)
     if discard_agent:
-        agent_instances.delete(session_id)
-        agent_locks.delete(session_id)
+        if stopped:
+            agent_instances.delete(session_id)
+            agent_locks.delete(session_id)
+        else:
+            logger.warning(
+                "Keeping agent for %s because its worker is still shutting down",
+                session_id,
+            )
+    return stopped
+
+
+def reject_if_session_stream_active(session_id: str) -> None:
+    if not has_active_session_stream(session_id):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail="A response is already running for this session. Stop it before sending another message.",
+    )
 
 
 def _fallback_session_theme(seed_text: Optional[str]) -> str:
@@ -332,12 +378,8 @@ def get_or_create_agent(session_id: str) -> Any:
         apply_agent_model(agent, model)
         return agent
     
-    # 获取或创建该 session 的锁
-    lock = agent_locks.get(session_id)
-    if lock is None:
-        lock = threading.RLock()
-        agent_locks.set(session_id, lock)
-        lock = agent_locks.get(session_id)
+    # 获取或创建该 session 的锁（原子操作，消除 TOCTOU 竞态）
+    lock = agent_locks.get_or_setdefault(session_id, threading.RLock)
     
     # 双重检查锁定
     with lock:
@@ -421,6 +463,12 @@ async def event_generator(session_id: str, user_input: str, stream_id: Optional[
                 db.save_session_state(session_id, context, full_context)
                 yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
                 break
+
+            else:
+                logger.warning(
+                    "Unknown stream event type=%r from session=%s — silently ignored, check stream_adapter",
+                    event.type, session_id,
+                )
     
     except Exception as e:
         logger.error(f"Stream error for session {session_id}: {e}", exc_info=True)
@@ -769,8 +817,7 @@ async def chat(session_id: str, request: ChatRequest, background_tasks: Backgrou
                 db.update_session_model(session_id, requested_model)
                 session["model"] = requested_model
 
-            if has_active_session_stream(session_id):
-                interrupt_session_stream(session_id, discard_agent=True)
+            reject_if_session_stream_active(session_id)
 
             active_streams.set(session_id, stream_id)
             running_streams.set(session_id, stream_id)

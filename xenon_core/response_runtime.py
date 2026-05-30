@@ -1,94 +1,7 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Callable, Dict, List, Optional
-
-
-TOOLLESS_ACTION_GUARD_PREFIX = "[TOOLLESS_ACTION_GUARD]"
-_PATH_OR_FILE_RE = re.compile(
-    r"(?:[A-Za-z]:[\\/][^\s'\"<>|]+|/[^\s'\"<>|]+|`[^`]+\.(?:py|md|json|txt|html|bat|sh|csv|xlsx|docx|pdf)`)",
-    re.IGNORECASE,
-)
-_FIRST_PERSON_ACTION_MARKERS = (
-    "让我",
-    "我先",
-    "我来",
-    "我现在",
-    "这就",
-    "马上",
-    "来修",
-    "let me",
-    "i'll",
-    "i will",
-    "i am going to",
-    "i'm going to",
-)
-_ACTION_VERBS = (
-    "查看",
-    "看看",
-    "读取",
-    "检查",
-    "搜索",
-    "查找",
-    "定位",
-    "打开",
-    "修改",
-    "修正",
-    "修复",
-    "写入",
-    "替换",
-    "同步",
-    "运行",
-    "执行",
-    "验证",
-    "加载",
-    "调用",
-    "确认",
-    "核对",
-    "对比",
-    "创建",
-    "删除",
-    "保存",
-    "inspect",
-    "read",
-    "check",
-    "search",
-    "locate",
-    "open",
-    "modify",
-    "edit",
-    "fix",
-    "write",
-    "replace",
-    "sync",
-    "run",
-    "execute",
-    "verify",
-    "load",
-    "call",
-)
-_ACTION_COMPLETION_CLAIMS = (
-    "找到了",
-    "看到了",
-    "检查完",
-    "读取完",
-    "修正完",
-    "修改完",
-    "修复完",
-    "已修正",
-    "已修改",
-    "已写入",
-    "已同步",
-    "已完成",
-    "完成了",
-    "搞定",
-    "验证通过",
-    "fixed",
-    "done",
-    "updated",
-    "verified",
-)
 
 
 def _safe_print(print_fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
@@ -282,17 +195,6 @@ def process_streaming_response(
                 content=final_content,
                 reasoning_content=reasoning_content,
             )
-            if _continue_after_toolless_action_claim(
-                messages=messages,
-                tools=tools,
-                content=final_content,
-                reasoning_content=reasoning_content,
-                append_conversation_message_fn=append_conversation_message_fn,
-                continue_chat_fn=continue_chat_fn,
-                model_for_recursive_chat=model_for_recursive_chat,
-                logger=logger,
-            ):
-                return
 
     except interrupted_exception_cls:
         raise
@@ -339,22 +241,20 @@ def process_non_streaming_response(
             "role": "assistant",
             "content": response_content,
         }
+        if reasoning_content:
+            assistant_message["reasoning_content"] = reasoning_content
+
         if original_tool_calls:
             assistant_message["tool_calls"] = [
                 _serialize_tool_call(tool_call) for tool_call in original_tool_calls
             ]
-        if reasoning_content:
-            assistant_message["reasoning_content"] = reasoning_content
-        append_conversation_message_fn(messages, assistant_message)
-
-        if reasoning_content or response_content:
-            save_memory_log_fn(
-                "assistant",
-                content=response_content,
-                reasoning_content=reasoning_content,
-            )
-
-        if original_tool_calls:
+            append_conversation_message_fn(messages, assistant_message)
+            if reasoning_content or response_content:
+                save_memory_log_fn(
+                    "assistant",
+                    content=response_content,
+                    reasoning_content=reasoning_content,
+                )
             handle_tool_calls_fn(original_tool_calls, messages, tools)
             _raise_if_interrupted(
                 is_interrupted_fn=is_interrupted_fn,
@@ -362,17 +262,13 @@ def process_non_streaming_response(
             )
             updated_tools = get_current_tools_fn()
             continue_chat_fn(messages, updated_tools, model_for_recursive_chat)
-        elif _continue_after_toolless_action_claim(
-            messages=messages,
-            tools=tools,
-            content=response_content,
-            reasoning_content=reasoning_content,
-            append_conversation_message_fn=append_conversation_message_fn,
-            continue_chat_fn=continue_chat_fn,
-            model_for_recursive_chat=model_for_recursive_chat,
-            logger=logger,
-        ):
-            return
+        elif reasoning_content or response_content:
+            append_conversation_message_fn(messages, assistant_message)
+            save_memory_log_fn(
+                "assistant",
+                content=response_content,
+                reasoning_content=reasoning_content,
+            )
 
     except interrupted_exception_cls:
         raise
@@ -498,110 +394,3 @@ def _serialize_tool_call(tool_call: Any) -> Dict[str, Any]:
         },
     }
 
-
-def _continue_after_toolless_action_claim(
-    *,
-    messages: List[Dict[str, Any]],
-    tools: List[Dict[str, Any]],
-    content: str,
-    reasoning_content: str,
-    append_conversation_message_fn: Callable[[List[Dict[str, Any]], Dict[str, Any]], None],
-    continue_chat_fn: Callable[[List[Dict[str, Any]], List[Dict[str, Any]], str], None],
-    model_for_recursive_chat: str,
-    logger: Any,
-) -> bool:
-    if not _should_retry_toolless_action_claim(
-        messages=messages,
-        tools=tools,
-        content=content,
-        reasoning_content=reasoning_content,
-    ):
-        return False
-
-    logger.warning(
-        "Detected assistant action claim without tool_calls; requesting a tool-call follow-up."
-    )
-    append_conversation_message_fn(
-        messages,
-        {
-            "role": "system",
-            "content": _build_toolless_action_guard_message(tools),
-        },
-    )
-    continue_chat_fn(messages, tools, model_for_recursive_chat)
-    return True
-
-
-def _should_retry_toolless_action_claim(
-    *,
-    messages: List[Dict[str, Any]],
-    tools: List[Dict[str, Any]],
-    content: str,
-    reasoning_content: str,
-) -> bool:
-    if not _has_callable_tools(tools):
-        return False
-    if _current_user_turn_already_has_tool_or_guard(messages):
-        return False
-    return _looks_like_toolless_action_claim(content) or _looks_like_toolless_action_claim(
-        reasoning_content
-    )
-
-
-def _has_callable_tools(tools: List[Dict[str, Any]]) -> bool:
-    return any((tool.get("function", {}) or {}).get("name") for tool in tools or [])
-
-
-def _current_user_turn_already_has_tool_or_guard(messages: List[Dict[str, Any]]) -> bool:
-    last_user_index = -1
-    for index in range(len(messages or []) - 1, -1, -1):
-        if messages[index].get("role") == "user":
-            last_user_index = index
-            break
-
-    scoped = messages[last_user_index + 1 :] if last_user_index >= 0 else messages or []
-    for message in scoped:
-        if message.get("tool_calls"):
-            return True
-        if (
-            message.get("role") == "system"
-            and str(message.get("content", "")).startswith(TOOLLESS_ACTION_GUARD_PREFIX)
-        ):
-            return True
-    return False
-
-
-def _looks_like_toolless_action_claim(value: str) -> bool:
-    text = str(value or "").strip()
-    if not text:
-        return False
-
-    lowered = text.lower()
-    first_person_action = any(marker in lowered for marker in _FIRST_PERSON_ACTION_MARKERS)
-    has_action_verb = any(verb in lowered for verb in _ACTION_VERBS)
-    completion_claim = any(claim in lowered for claim in _ACTION_COMPLETION_CLAIMS)
-    has_path_or_file = bool(_PATH_OR_FILE_RE.search(text))
-
-    if first_person_action and has_action_verb:
-        return True
-    if completion_claim and (has_action_verb or has_path_or_file):
-        return True
-    if has_path_or_file and first_person_action:
-        return True
-    return False
-
-
-def _build_toolless_action_guard_message(tools: List[Dict[str, Any]]) -> str:
-    tool_names = [
-        (tool.get("function", {}) or {}).get("name", "")
-        for tool in tools or []
-    ]
-    tool_names = [name for name in tool_names if name]
-    available = ", ".join(tool_names[:8]) or "none"
-    return (
-        f"{TOOLLESS_ACTION_GUARD_PREFIX} Previous assistant text described reading, editing, "
-        "checking, or verifying, but this user turn has no tool_call yet. Do not continue "
-        "describing external actions in prose. Immediately emit a real tool_call. If the needed "
-        "business module is not loaded, call load_module first with the relevant module_names. "
-        f"Currently callable tools: {available}."
-    )

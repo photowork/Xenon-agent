@@ -26,7 +26,8 @@ def _env_float(name: str, default: float) -> float:
 STREAM_QUEUE_POLL_SECONDS = max(_env_float("XENON_WEBUI_STREAM_POLL_SECONDS", 0.25), 0.05)
 STREAM_HEARTBEAT_SECONDS = max(_env_float("XENON_WEBUI_STREAM_HEARTBEAT_SECONDS", 15.0), 0.0)
 STREAM_IDLE_TIMEOUT_SECONDS = max(_env_float("XENON_WEBUI_STREAM_IDLE_TIMEOUT", 300.0), 0.0)
-STREAM_WORKER_JOIN_SECONDS = max(_env_float("XENON_WEBUI_STREAM_WORKER_JOIN_SECONDS", 0.25), 0.0)
+STREAM_WORKER_JOIN_SECONDS = max(_env_float("XENON_WEBUI_STREAM_WORKER_JOIN_SECONDS", 3.0), 0.0)
+STREAM_INTERRUPT_JOIN_SECONDS = max(_env_float("XENON_WEBUI_STREAM_INTERRUPT_JOIN_SECONDS", 2.0), 0.0)
 
 
 @dataclass
@@ -47,8 +48,6 @@ class AIAgentStreamAdapter:
         self.agent = agent
         self.lock = threading.Lock()
         self.last_message_count = 0
-        self.monitoring = False
-        self.stop_monitoring = False
         self._state_lock = threading.RLock()
         self._active_queue: Optional[Queue] = None
         self._active_stop_event: Optional[threading.Event] = None
@@ -98,6 +97,17 @@ class AIAgentStreamAdapter:
         with self._state_lock:
             worker_thread = self._active_worker_thread
         return worker_thread is not None and worker_thread.is_alive()
+
+    def wait_for_worker(self, timeout: Optional[float] = None) -> bool:
+        with self._state_lock:
+            worker_thread = self._active_worker_thread
+
+        if worker_thread is None:
+            return True
+        worker_thread.join(STREAM_INTERRUPT_JOIN_SECONDS if timeout is None else timeout)
+        if worker_thread.is_alive():
+            return False
+        return True
     
     def stream_chat(self, user_input: str) -> Generator[StreamEvent, None, None]:
         self._ensure_no_active_worker()
@@ -196,52 +206,15 @@ class AIAgentStreamAdapter:
         finally:
             if chat_thread.is_alive():
                 chat_thread.join(timeout=STREAM_WORKER_JOIN_SECONDS)
-            if not chat_thread.is_alive():
-                self._clear_active_state(event_queue, stop_event, chat_thread)
-    
-    def _check_for_new_messages(self) -> List[StreamEvent]:
-        events = []
-        
-        with self.lock:
-            current_messages = self.agent.current_context
-            new_count = len(current_messages)
-            
-            if new_count > self.last_message_count:
-                new_messages = current_messages[self.last_message_count:]
-                
-                for msg in new_messages:
-                    if msg.get('role') == 'assistant':
-                        reasoning = msg.get('reasoning_content', '')
-                        content = msg.get('content', '')
-                        tool_calls = msg.get('tool_calls', [])
-                        
-                        if reasoning:
-                            events.append(StreamEvent(type='thinking', content=reasoning))
-                        
-                        if tool_calls:
-                            for tc in tool_calls:
-                                if isinstance(tc, dict):
-                                    name = tc.get('function', {}).get('name', '')
-                                    args = tc.get('function', {}).get('arguments', '')
-                                    tc_id = tc.get('id', '')
-                                    if name or args:
-                                        events.append(StreamEvent(type='tool_call', 
-                                            content=f"{name}({args})",
-                                            tool_call=tc,
-                                            tool_call_id=tc_id))
-                        
-                        if content:
-                            events.append(StreamEvent(type='content', content=content))
-                    
-                    elif msg.get('role') == 'tool':
-                        tool_content = msg.get('content', '')
-                        tool_call_id = msg.get('tool_call_id', '')
-                        if tool_content:
-                            events.append(StreamEvent(type='tool_result', content=tool_content, tool_call_id=tool_call_id))
-                
-                self.last_message_count = new_count
-        
-        return events
+            if chat_thread.is_alive():
+                # 线程在超时后仍存活 — 仍清除状态以避免阻塞后续请求
+                # agent.interrupted 标志已设置，旧 chat 应自行中止
+                print(
+                    f"Warning: chat thread still alive after {STREAM_WORKER_JOIN_SECONDS}s join, "
+                    "releasing active state anyway",
+                    file=sys.stderr,
+                )
+            self._clear_active_state(event_queue, stop_event, chat_thread)
     
     def get_messages_from_context(self) -> List[Dict[str, Any]]:
         return self.agent.current_context.copy()
@@ -310,6 +283,12 @@ class AsyncAIAgentWrapper:
                     try:
                         gen.close()
                     except ValueError:
+                        # Generator still executing in thread pool — 
+                        # adapter.interrupt() already sent stop signals,
+                        # the generator will complete naturally. Safe to ignore.
+                        pass
+                    except Exception:
+                        # Other unexpected errors during close — don't crash the event loop
                         pass
             
             try:
@@ -346,6 +325,9 @@ class AsyncAIAgentWrapper:
 
     def has_pending_worker(self) -> bool:
         return self.adapter.has_pending_worker()
+
+    def wait_for_worker(self, timeout: Optional[float] = None) -> bool:
+        return self.adapter.wait_for_worker(timeout)
     
     def get_context(self) -> List[Dict[str, Any]]:
         return self.adapter.get_messages_from_context()
