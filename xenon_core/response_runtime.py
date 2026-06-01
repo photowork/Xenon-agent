@@ -4,6 +4,34 @@ import json
 from typing import Any, Callable, Dict, List, Optional
 
 
+TOOL_PROGRESS_ARGUMENT_STEP_CHARS = 256
+MUTATING_TOOL_NAME_PARTS = (
+    "write",
+    "create",
+    "append",
+    "insert",
+    "str_replace",
+    "replace",
+    "delete",
+    "move",
+    "copy",
+)
+
+
+class StreamTransportError(RuntimeError):
+    """Raised when the model stream ends because the HTTP transport broke."""
+
+
+STREAM_TRANSPORT_ERROR_MARKERS = (
+    "incomplete chunked read",
+    "peer closed connection without sending complete message body",
+    "remote protocol error",
+    "connection reset",
+    "read timeout",
+    "network error",
+)
+
+
 def _safe_print(print_fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
     try:
         print_fn(*args, **kwargs)
@@ -112,6 +140,7 @@ def process_streaming_response(
     tool_calls_buffer: List[Dict[str, Any]] = []
     tool_calls_by_index: Dict[Any, Dict[str, Any]] = {}
     tool_calls_by_id: Dict[str, Dict[str, Any]] = {}
+    tool_progress_state: Dict[str, Dict[str, Any]] = {}
 
     try:
         for chunk in response:
@@ -142,11 +171,16 @@ def process_streaming_response(
 
             delta_tool_calls = getattr(delta, "tool_calls", None)
             if delta_tool_calls:
-                _collect_streamed_tool_calls(
+                changed_tool_calls = _collect_streamed_tool_calls(
                     delta_tool_calls=delta_tool_calls,
                     tool_calls_buffer=tool_calls_buffer,
                     tool_calls_by_index=tool_calls_by_index,
                     tool_calls_by_id=tool_calls_by_id,
+                )
+                _emit_streamed_tool_progress_events(
+                    changed_tool_calls=changed_tool_calls,
+                    stream_callback=stream_callback,
+                    progress_state=tool_progress_state,
                 )
 
         _safe_print(print_fn)
@@ -199,6 +233,17 @@ def process_streaming_response(
     except interrupted_exception_cls:
         raise
     except Exception as error:
+        if _is_stream_transport_error(error):
+            _close_response_safely(response)
+            logger.warning("流式响应传输中断，将交由上层重试: %s", error)
+            if stream_callback:
+                stream_callback(
+                    {
+                        "type": "tool_progress",
+                        "content": "流式连接中断，正在切换到非流式方式重试...",
+                    }
+                )
+            raise StreamTransportError(str(error)) from error
         logger.error("处理流式响应失败: %s", error)
         _safe_print(print_fn, f"\n错误: {error}")
 
@@ -298,13 +343,20 @@ def _close_response_safely(response: Any) -> None:
         pass
 
 
+def _is_stream_transport_error(error: Exception) -> bool:
+    text = f"{type(error).__module__}.{type(error).__name__}: {error}".lower()
+    return any(marker in text for marker in STREAM_TRANSPORT_ERROR_MARKERS)
+
+
 def _collect_streamed_tool_calls(
     *,
     delta_tool_calls: Any,
     tool_calls_buffer: List[Dict[str, Any]],
     tool_calls_by_index: Dict[Any, Dict[str, Any]],
     tool_calls_by_id: Dict[str, Dict[str, Any]],
-) -> None:
+) -> List[Dict[str, Any]]:
+    changed_tool_calls: List[Dict[str, Any]] = []
+
     for tool_call in delta_tool_calls:
         tool_index = getattr(tool_call, "index", None)
         tool_call_id = getattr(tool_call, "id", None)
@@ -347,6 +399,71 @@ def _collect_streamed_tool_calls(
                 current_tool_call["function"]["name"] = function_name
             if function_arguments:
                 current_tool_call["function"]["arguments"] += function_arguments
+            if function_name or function_arguments:
+                changed_tool_calls.append(current_tool_call)
+
+    return changed_tool_calls
+
+
+def _emit_streamed_tool_progress_events(
+    *,
+    changed_tool_calls: List[Dict[str, Any]],
+    stream_callback: Optional[Callable[[Dict[str, Any]], None]],
+    progress_state: Dict[str, Dict[str, Any]],
+) -> None:
+    if not stream_callback:
+        return
+
+    emitted_ids = set()
+    for tool_call in changed_tool_calls:
+        tool_call_id = tool_call.get("id") or f"tool_call_{len(progress_state)}"
+        if tool_call_id in emitted_ids:
+            continue
+        emitted_ids.add(tool_call_id)
+
+        function_payload = tool_call.get("function", {}) or {}
+        tool_name = function_payload.get("name") or ""
+        arguments = function_payload.get("arguments") or ""
+        argument_chars = len(arguments)
+
+        if not tool_name and argument_chars <= 0:
+            continue
+
+        previous = progress_state.get(tool_call_id, {})
+        last_chars = int(previous.get("argument_chars", -TOOL_PROGRESS_ARGUMENT_STEP_CHARS))
+        last_tool_name = previous.get("tool_name", "")
+
+        should_emit = (
+            not previous
+            or tool_name != last_tool_name
+            or argument_chars - last_chars >= TOOL_PROGRESS_ARGUMENT_STEP_CHARS
+        )
+        if not should_emit:
+            continue
+
+        progress_state[tool_call_id] = {
+            "argument_chars": argument_chars,
+            "tool_name": tool_name,
+        }
+        stream_callback(
+            {
+                "type": "tool_progress",
+                "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+                "content": _build_tool_argument_progress_message(tool_name, argument_chars),
+            }
+        )
+
+
+def _build_tool_argument_progress_message(tool_name: str, argument_chars: int) -> str:
+    label = "正在准备文件操作" if _looks_like_mutating_tool(tool_name) else "正在准备工具调用"
+    tool_label = tool_name or "tool"
+    return f"{label}: {tool_label} ({argument_chars:,} 字符)"
+
+
+def _looks_like_mutating_tool(tool_name: str) -> bool:
+    lowered = (tool_name or "").lower()
+    return any(part in lowered for part in MUTATING_TOOL_NAME_PARTS)
 
 
 def _finalize_streamed_tool_calls(
@@ -393,4 +510,3 @@ def _serialize_tool_call(tool_call: Any) -> Dict[str, Any]:
             "arguments": getattr(function_payload, "arguments", None),
         },
     }
-

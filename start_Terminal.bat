@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 echo ========================================
-echo      Xenon 0.3.5 AI Agent Startup
+echo      Xenon 0.3.6 AI Agent Startup
 echo ========================================
 echo.
 
@@ -19,7 +19,7 @@ if not exist "venv\Scripts\python.exe" (
 echo [1/2] Activating virtual environment...
 call "venv\Scripts\activate.bat"
 
-echo [2/2] Starting Xenon 0.3.5 (with Meta-Cognition)...
+echo [2/2] Starting Xenon 0.3.6 (with Meta-Cognition)...
 echo.
 echo ========================================
 "venv\Scripts\python.exe" "Xenon.py"

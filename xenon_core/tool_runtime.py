@@ -38,6 +38,7 @@ class ToolManager:
         self._rw_lock = threading.RLock()
         self.load_report: Dict[str, Any] = {}
         self._load_tools()
+        self.start_file_watcher()
 
     def _load_tools(self):
         if not self.tools_dir.exists():
@@ -315,7 +316,8 @@ class ToolManager:
             def __init__(self, tool_manager):
                 self.tool_manager = tool_manager
 
-            def on_modified(self, event):
+            def _handle_change(self, event):
+                """统一的文件变更处理入口"""
                 if event.src_path.endswith(".py"):
                     path = Path(event.src_path)
                     try:
@@ -334,6 +336,12 @@ class ToolManager:
                                 self.tool_manager._debounce_timer.start()
                     except ValueError:
                         pass
+
+            def on_modified(self, event):
+                self._handle_change(event)
+
+            def on_created(self, event):
+                self._handle_change(event)
 
             def _reload_tools(self):
                 logger.info("防抖延迟结束，重新加载工具...")

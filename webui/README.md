@@ -1,6 +1,6 @@
 # Xenon Web UI
 
-基于 `Xenon0_3_5.py` 的网页对话界面，支持流式响应、会话管理、工具调用展示和中断控制。
+基于 `Xenon.py` 的网页对话界面，支持流式响应、会话管理、工具调用展示和中断控制。
 
 ## 功能
 
@@ -17,7 +17,7 @@
   - `D:\Xenon\agent_Xenon\venv\Scripts\python.exe`
 - 确保项目根目录存在：
   - `deepseekconfig.py`
-  - `Xenon0_3_5.py`
+  - `Xenon.py`
 - 首次运行前建议先安装依赖：
 
 ```bash
@@ -112,4 +112,4 @@ venv\Scripts\python.exe -c "import sys; print(sys.executable)"
 
 ### 工具能力与 CLI 表现不一致
 
-Web UI 和 CLI 都依赖同一个主程序入口 `Xenon0_3_5.py`。如果两者表现不同，优先检查启动时输出的运行时健康检查和工具加载报告。
+Web UI 和 CLI 都依赖同一个主程序入口 `Xenon.py`。如果两者表现不同，优先检查启动时输出的运行时健康检查和工具加载报告。

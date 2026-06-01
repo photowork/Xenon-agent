@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from xenon_core.model_request import build_chat_completion_kwargs
+from xenon_core.response_runtime import StreamTransportError
 from xenon_core.turn_compactor import sanitize_messages_for_api
 
 
@@ -87,7 +88,24 @@ def run_chat_cycle(
         )
 
         if enable_streaming:
-            process_streaming_response_fn(response, messages, tools)
+            try:
+                process_streaming_response_fn(response, messages, tools)
+            except StreamTransportError as error:
+                logger.warning("流式响应中断，正在使用非流式请求重试一次: %s", error)
+                print_fn("\n[提示] 流式连接中断，正在用非流式方式重试一次...")
+                fallback_kwargs = build_chat_completion_kwargs(
+                    model=model,
+                    messages=api_messages,
+                    tools=tools,
+                    stream=False,
+                    thinking_enabled=thinking_enabled,
+                    reasoning_effort=reasoning_effort,
+                )
+                fallback_response = retry_request_fn(
+                    create_completion_fn,
+                    **fallback_kwargs,
+                )
+                process_non_streaming_response_fn(fallback_response, messages, tools)
         else:
             process_non_streaming_response_fn(response, messages, tools)
 

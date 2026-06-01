@@ -11,6 +11,19 @@ from xenon_core.tool_payload_runtime import (
 )
 
 
+MUTATING_TOOL_NAME_PARTS = (
+    "write",
+    "create",
+    "append",
+    "insert",
+    "str_replace",
+    "replace",
+    "delete",
+    "move",
+    "copy",
+)
+
+
 def touch_tool_usage(
     tool_name: str,
     *,
@@ -67,6 +80,15 @@ def execute_tool_call(
         )
 
         set_tool_executing_fn(True)
+        if stream_callback:
+            stream_callback(
+                {
+                    "type": "tool_progress",
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "content": build_tool_execution_progress_message(tool_name, arguments),
+                }
+            )
         result = execute_tool_fn(tool_name, arguments)
         result_text = str(result)
         display_result_text = build_compact_tool_result_preview(tool_name, arguments, result)
@@ -144,6 +166,55 @@ def execute_tool_call(
 
     finally:
         set_tool_executing_fn(False)
+
+
+def build_tool_execution_progress_message(tool_name: str, arguments: Dict[str, Any]) -> str:
+    if not _looks_like_mutating_tool(tool_name):
+        return f"开始执行工具: {tool_name}"
+
+    target_path = _extract_target_path(arguments)
+    payload = _extract_text_payload(arguments)
+    details = []
+    if target_path:
+        details.append(_truncate_text(target_path, 120))
+    if payload:
+        details.append(f"{len(payload):,} 字符 / {_count_lines(payload):,} 行")
+
+    suffix = f" ({', '.join(details)})" if details else ""
+    return f"开始执行文件操作: {tool_name}{suffix}"
+
+
+def _looks_like_mutating_tool(tool_name: str) -> bool:
+    lowered = (tool_name or "").lower()
+    return any(part in lowered for part in MUTATING_TOOL_NAME_PARTS)
+
+
+def _extract_target_path(arguments: Dict[str, Any]) -> str:
+    for key in ("file_path", "path", "destination_path", "source_path"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _extract_text_payload(arguments: Dict[str, Any]) -> str:
+    for key in ("content", "new_str"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _count_lines(text: str) -> int:
+    if not text:
+        return 0
+    return text.count("\n") + 1
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 def _record_failed_tool_call(

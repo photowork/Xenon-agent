@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Union, Tuple
 
-__version__ = "0.3.5"
+__version__ = "0.3.6"
 APP_VERSION = __version__
 
 from xenon_core.cognitive_network import CognitiveNetworkState

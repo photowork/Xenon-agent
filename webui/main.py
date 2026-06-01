@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field, field_validator
 from openai import OpenAI
 import uvicorn
 
-from Xenon import AIAgent, AVAILABLE_MODELS, BASE_URL, API_KEY, MODEL
+from Xenon import AIAgent, AVAILABLE_MODELS, BASE_URL, API_KEY, MODEL, APP_VERSION
 from webui.database import Database
 from webui.stream_adapter import create_stream_adapter
 from xenon_core.runtime_health import (
@@ -155,10 +155,10 @@ class ThreadSafeDict:
     def get_all_keys(self):
         with self._lock:
             return list(self._dict.keys())
-    
+
     def get_ref(self, key):
         """返回 key 对应值的原始引用（非副本），修改返回值会影响共享数据。
-        
+
         如需安全副本请使用 get_copy(key) 或调用方自行 copy.deepcopy。
         """
         with self._lock:
@@ -447,6 +447,9 @@ async def event_generator(session_id: str, user_input: str, stream_id: Optional[
 
             elif event.type == 'tool_call':
                 yield f"data: {json.dumps({'type': 'tool_call', 'tool_name': event.tool_name, 'arguments': event.arguments, 'tool_call_id': event.tool_call_id}, ensure_ascii=False)}\n\n"
+
+            elif event.type == 'tool_progress':
+                yield f"data: {json.dumps({'type': 'tool_progress', 'content': event.content, 'tool_name': event.tool_name, 'tool_call_id': event.tool_call_id}, ensure_ascii=False)}\n\n"
             
             elif event.type == 'tool_result':
                 yield f"data: {json.dumps({'type': 'tool_result', 'content': event.content}, ensure_ascii=False)}\n\n"
@@ -612,6 +615,7 @@ async def get_models():
     return {
         "models": AVAILABLE_MODELS,
         "default_model": MODEL,
+        "app_version": APP_VERSION,
     }
 
 
@@ -619,6 +623,7 @@ async def get_models():
 async def health():
     return {
         "status": "ok",
+        "app_version": APP_VERSION,
         "host": WEBUI_HOST,
         "port": WEBUI_PORT,
         "prewarm": resolve_webui_prewarm_mode(),
