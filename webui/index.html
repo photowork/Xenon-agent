@@ -155,6 +155,13 @@
             white-space: nowrap;
         }
 
+        .app-version {
+            flex: 0 0 auto;
+            font-size: 0.78rem;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+
         .model-select {
             background: #1e1e36;
             color: #eee;
@@ -275,6 +282,19 @@
             margin: 4px 0;
             max-height: 200px;
             overflow-y: auto;
+            overflow-wrap: break-word;
+            word-wrap: break-word;
+            word-break: break-word;
+            max-width: 100%;
+        }
+
+        .tool-progress {
+            background: #243b4f;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            color: #9ee7ff;
+            margin: 4px 0;
             overflow-wrap: break-word;
             word-wrap: break-word;
             word-break: break-word;
@@ -892,6 +912,15 @@
             content: none;
         }
 
+        .app-version {
+            margin-left: auto;
+            color: var(--x-moss-deep);
+            font-size: 0.8rem;
+            font-weight: 800;
+            opacity: 0.72;
+            white-space: nowrap;
+        }
+
         .model-select {
             width: min(220px, 100%);
             height: 28px;
@@ -968,7 +997,8 @@
         }
 
         .tool-call,
-        .tool-result {
+        .tool-result,
+        .tool-progress {
             border-radius: 0;
             border: 1px solid rgba(205, 232, 229, 0.18);
             font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
@@ -982,6 +1012,11 @@
         .tool-result {
             background: rgba(205, 232, 229, 0.12);
             color: #d7f4ed;
+        }
+
+        .tool-progress {
+            background: rgba(62, 143, 153, 0.2);
+            color: #b8fff7;
         }
 
         .msg-details {
@@ -1285,6 +1320,10 @@
                 font-size: 0.82rem;
             }
 
+            .app-version {
+                font-size: 0.74rem;
+            }
+
             .model-select {
                 width: min(210px, 100%);
                 height: 27px;
@@ -1375,6 +1414,7 @@
             <div class="chat-header">
                 <button class="mobile-menu-btn" id="mobileMenuBtn" type="button" aria-label="打开会话列表">☰</button>
                 <div class="chat-title" id="chatTitle">新对话</div>
+                <div class="app-version" id="appVersion" aria-label="当前版本">v0.3.6</div>
             </div>
 
             <div class="messages-container" id="messagesContainer">
@@ -1436,6 +1476,7 @@
             sendBtn: document.getElementById('sendBtn'),
             newChatBtn: document.getElementById('newChatBtn'),
             chatTitle: document.getElementById('chatTitle'),
+            appVersion: document.getElementById('appVersion'),
             modelSelect: document.getElementById('modelSelect')
         };
 
@@ -1501,6 +1542,9 @@
                 const data = await response.json();
                 availableModels = data.models || [];
                 currentModel = currentModel || data.default_model || availableModels[0] || null;
+                if (data.app_version && elements.appVersion) {
+                    elements.appVersion.textContent = `v${data.app_version}`;
+                }
                 renderModelOptions();
             } catch (error) {
                 console.error('Failed to load models:', error);
@@ -1819,6 +1863,7 @@
 
             let currentThinkingEl = null;
             let currentContentEl = null;
+            let currentToolProgressEl = null;
             const sessionIdForRequest = currentSessionId;
             const modelForRequest = currentModel;
             const abortController = new AbortController();
@@ -1850,6 +1895,37 @@
                 }
             };
 
+            const ensureToolProgressElement = () => {
+                if (!currentToolProgressEl) {
+                    const messageDiv = document.createElement('div');
+                    messageDiv.className = 'message assistant';
+                    messageDiv.innerHTML = `<details class="msg-details" open><summary>工具状态</summary><div class="tool-progress"></div></details>`;
+                    elements.messagesContainer.appendChild(messageDiv);
+                    currentToolProgressEl = messageDiv.querySelector('.tool-progress');
+                }
+                return currentToolProgressEl;
+            };
+
+            const updateToolProgress = (content) => {
+                const progressEl = ensureToolProgressElement();
+                progressEl.textContent = content || '正在处理工具调用...';
+            };
+
+            const finishToolProgress = (summaryText = '工具状态') => {
+                if (!currentToolProgressEl) {
+                    return;
+                }
+                const details = currentToolProgressEl.closest('details');
+                if (details) {
+                    details.open = false;
+                    const summary = details.querySelector('summary');
+                    if (summary) {
+                        summary.textContent = summaryText;
+                    }
+                }
+                currentToolProgressEl = null;
+            };
+
             const finishStream = async () => {
                 receivedDoneEvent = true;
                 resetStreamingState(requestId);
@@ -1871,6 +1947,7 @@
                 }
                 currentThinkingEl = null;
                 currentContentEl = null;
+                currentToolProgressEl = null;
                 updateSendButton();
                 const indicator = document.getElementById('typing-indicator');
                 if (indicator && indicator.parentNode) {
@@ -1950,8 +2027,14 @@
                                     }
                                     currentThinkingEl.textContent += data.content;
                                     scrollToBottom();
+                                } else if (data.type === 'tool_progress') {
+                                    collapseThinking();
+                                    currentContentEl = null;
+                                    updateToolProgress(data.content);
+                                    scrollToBottom();
                                 } else if (data.type === 'content') {
                                     collapseThinking();
+                                    finishToolProgress();
                                     if (data.content === '\n') {
                                         ensureAssistantContentElement();
                                         currentContentEl.textContent += '\n';
@@ -1967,18 +2050,23 @@
                                     messageDiv.className = 'message assistant';
                                     const toolName = data.tool_name || '';
                                     const args = data.arguments || '';
+                                    if (toolName) {
+                                        updateToolProgress(`工具调用已准备，等待执行: ${toolName}`);
+                                    }
                                     messageDiv.innerHTML = `<details class="msg-details"><summary>🔧 工具调用</summary><div class="tool-call">${escapeHtml(toolName)}(${escapeHtml(args)})</div></details>`;
                                     elements.messagesContainer.appendChild(messageDiv);
                                     scrollToBottom();
                                 } else if (data.type === 'tool_result') {
                                     currentThinkingEl = null;
                                     currentContentEl = null;
+                                    finishToolProgress('工具已完成');
                                     const messageDiv = document.createElement('div');
                                     messageDiv.className = 'message assistant';
                                     messageDiv.innerHTML = `<details class="msg-details"><summary>📋 结果</summary><div class="tool-result">${escapeHtml(data.content || '')}</div></details>`;
                                     elements.messagesContainer.appendChild(messageDiv);
                                     scrollToBottom();
                                 } else if (data.type === 'error') {
+                                    finishToolProgress('工具已停止');
                                     appendMessage({
                                         role: 'assistant',
                                         type: 'error',
@@ -1987,6 +2075,7 @@
                                     scrollToBottom();
                                 } else if (data.type === 'done') {
                                     collapseThinking();
+                                    finishToolProgress();
                                     await finishStream();
                                     return;
                                 }
