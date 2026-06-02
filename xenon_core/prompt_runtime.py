@@ -109,7 +109,7 @@ def build_available_tools_message(
         "  * 绝对路径: 直接使用\n"
         f"  * 相对路径: 相对于项目根目录 {project_root}\n"
         "  * file_manager 默认基于当前工作目录\n"
-        "  * code_editor 默认基于项目根目录\n"
+        "  * code_editor_handler 默认基于项目根目录\n"
         "  * Windows 路径支持 \\\\ 或 /\n"
     )
 
@@ -155,7 +155,7 @@ def build_available_tools_message(
     usage_guide = (
         "\n\n【工具使用指引】\n"
         "- 使用 load_module 工具加载模块，加载后即可直接调用该模块的全部工具\n"
-        "- 可以一次加载多个模块，如: load_module(['terminal_handler', 'file_handler'])\n"
+        "- 可以一次加载多个模块，如: load_module(['terminal_handler', 'file_manager'])\n"
         "- 已加载的工具可直接调用，无需再获取描述\n"
         "- 工具加载状态只在当前轮对话内保留；进入下一轮对话后需要重新加载"
     )

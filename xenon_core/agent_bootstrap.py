@@ -26,7 +26,7 @@ def build_core_management_tools() -> Dict[str, Dict[str, Any]]:
                         "module_names": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "要加载的模块名称列表，如 ['terminal_handler', 'file_handler']",
+                            "description": "要加载的模块名称列表，如 ['code_editor_handler', 'file_manager']",
                         }
                     },
                     "required": ["module_names"],

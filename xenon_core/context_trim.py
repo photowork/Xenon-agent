@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Dict, List
 
-from xenon_core.turn_compactor import sanitize_messages_for_api
+from xenon_core.turn_compactor import compact_history_for_next_context
 
 
 DEFAULT_RECENT_TURNS_AFTER_TRIM = 3
@@ -189,7 +189,7 @@ def _recent_compact_history(
     if keep_recent_turns <= 0:
         return []
 
-    sanitized = sanitize_messages_for_api(history_source)
+    sanitized = compact_history_for_next_context(history_source)
     compact = [
         message
         for message in sanitized

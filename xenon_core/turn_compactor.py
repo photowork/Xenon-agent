@@ -36,6 +36,25 @@ _PATH_RE = re.compile(
     r"(?:[A-Za-z]:[\\/][^\s'\"<>|]+(?:[\\/][^\s'\"<>|]+)*|/[^\s'\"<>|]+(?:/[^\s'\"<>|]+)*)"
 )
 
+_TOOL_EVIDENCE_USER_RE = re.compile(
+    r"(?i)(?:"
+    r"[A-Za-z]:[\\/]|/[^\s'\"<>|]+|"
+    r"\.(?:py|js|ts|tsx|jsx|json|md|txt|yaml|yml|csv|xlsx|docx|pptx)\b|"
+    r"\b(?:api|trace|log|file|folder|directory|repo|git|pytest|curl|run|execute|test|debug|fix|install|pip|npm)\b|"
+    r"(?:文件|目录|路径|日志|接口|运行|执行|测试|检查|读取|查看|修改|修复|代码|项目|程序|报错|错误|保存|写入|创建|安装)"
+    r")"
+)
+
+_TOOL_ACTION_CLAIM_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:git|pytest|curl|pip|npm)\b|"
+    r"(?:让我|我先|我来|现在我|先运行|运行一下|直接测试|测试API|读取|查看|检查|修改|修复|写入|保存|创建|执行|运行|命令|已成功|成功读取|已经读取|已修改|已写入|诊断日志|搞定|ran|tested|read|checked|modified|wrote|saved|created|installed)"
+    r")"
+)
+
+_CHECKPOINT_SYSTEM_PREFIX = "【任务状态检查点】"
+_CONCEPTUAL_USER_RE = re.compile(r"(?i)(?:如何|怎么|怎样|为什么|解释|说明|\bhow\b|\bwhy\b|\bwhat\b|\bexplain\b)")
+
 
 def compact_turn_for_next_context(turn_messages: list[dict]) -> list[dict]:
     """
@@ -44,15 +63,54 @@ def compact_turn_for_next_context(turn_messages: list[dict]) -> list[dict]:
     """
     user_content, last_user_index = _find_last_message_content(turn_messages, "user")
     assistant_content, _ = _find_last_assistant_content(turn_messages)
+    has_tool_evidence = _has_tool_evidence(turn_messages, start_index=last_user_index)
 
     if _assistant_content_too_short(assistant_content):
         assistant_content = _build_outcome_summary(turn_messages, start_index=last_user_index) or assistant_content
+    elif (
+        assistant_content
+        and not has_tool_evidence
+        and _turn_needs_tool_evidence(user_content)
+        and _looks_like_tool_action_claim(assistant_content)
+    ):
+        assistant_content = ""
 
     compact_messages: List[Dict[str, str]] = []
     if user_content:
         compact_messages.append({"role": "user", "content": user_content})
     if assistant_content:
         compact_messages.append({"role": "assistant", "content": assistant_content})
+    return compact_messages
+
+
+def compact_history_for_next_context(messages: list[dict]) -> list[dict]:
+    """Compact a restored display transcript into API-safe turn summaries."""
+    compact_messages: List[Dict[str, str]] = []
+    current_turn: List[dict] = []
+
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+
+        role = message.get("role")
+        if role == "system":
+            content = _content_to_text(message.get("content", "")).strip()
+            if content.startswith(_CHECKPOINT_SYSTEM_PREFIX):
+                compact_messages.append({"role": "system", "content": content})
+            continue
+
+        if role == "user":
+            if current_turn:
+                compact_messages.extend(compact_turn_for_next_context(current_turn))
+            current_turn = [message]
+            continue
+
+        if role in {"assistant", "tool"} and current_turn:
+            current_turn.append(message)
+
+    if current_turn:
+        compact_messages.extend(compact_turn_for_next_context(current_turn))
+
     return compact_messages
 
 
@@ -195,6 +253,29 @@ def _build_outcome_summary(messages: list[dict], *, start_index: int) -> str:
     if not parts:
         return ""
     return "；".join(parts) + "。"
+
+
+def _has_tool_evidence(messages: list[dict], *, start_index: int) -> bool:
+    scoped_messages = messages[start_index + 1 :] if start_index >= 0 else messages
+    for message in scoped_messages:
+        if message.get("role") == "tool":
+            return True
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            return True
+    return False
+
+
+def _turn_needs_tool_evidence(user_content: str) -> bool:
+    text = user_content or ""
+    if not _TOOL_EVIDENCE_USER_RE.search(text):
+        return False
+    if _CONCEPTUAL_USER_RE.search(text) and not _PATH_RE.search(text):
+        return False
+    return True
+
+
+def _looks_like_tool_action_claim(assistant_content: str) -> bool:
+    return bool(_TOOL_ACTION_CLAIM_RE.search(assistant_content or ""))
 
 
 def _parse_payload(value: Any) -> Any:

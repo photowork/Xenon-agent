@@ -107,6 +107,7 @@ from xenon_core.tool_payload_runtime import (
     summarize_tool_payload_for_context as core_summarize_tool_payload_for_context,
 )
 from xenon_core.turn_compactor import (
+    compact_history_for_next_context as core_compact_history_for_next_context,
     compact_turn_for_next_context as core_compact_turn_for_next_context,
     sanitize_messages_for_api as core_sanitize_messages_for_api,
     trim_compact_history as core_trim_compact_history,
@@ -388,8 +389,9 @@ class AIAgent:
             if len(self.display_history) > MAX_DISPLAY_HISTORY_MESSAGES:
                 self.display_history = self.display_history[-MAX_DISPLAY_HISTORY_MESSAGES:]
 
-            # 压缩版本用于 API 提交（省 token）
-            sanitized = core_sanitize_messages_for_api(messages or [])
+            # 压缩版本用于 API 提交（省 token），恢复完整展示历史时也按轮次折叠，
+            # 避免把没有工具证据的“已执行/将执行”文本带回模型上下文。
+            sanitized = core_compact_history_for_next_context(messages or [])
             next_context = core_trim_compact_history(
                 sanitized,
                 MAX_COMPACT_HISTORY_TURNS,
@@ -530,7 +532,7 @@ class AIAgent:
             return copy.deepcopy(next_context)
         else:
             state_messages = self._preserved_state_messages(turn_messages)
-            previous_history = core_sanitize_messages_for_api(self.full_conversation_history)
+            previous_history = core_compact_history_for_next_context(self.full_conversation_history)
             current_turn = core_compact_turn_for_next_context(turn_messages)
             next_context = state_messages + previous_history + current_turn
 

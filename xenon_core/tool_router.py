@@ -25,10 +25,6 @@ class ToolRouter:
             "keywords": ["code", "class", "function", "module", "structure", "入口", "导航", "scan"],
             "phases": ["analyze", "locate", "debug"],
         },
-        "code_editor": {
-            "keywords": ["edit", "modify", "change", "fix", "patch", "write", "replace", "重构", "修改"],
-            "phases": ["edit", "debug"],
-        },
         "code_editor_handler": {
             "keywords": ["edit", "modify", "change", "fix", "patch", "write", "replace", "重构", "修改"],
             "phases": ["edit", "debug"],

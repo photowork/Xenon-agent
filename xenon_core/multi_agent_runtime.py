@@ -26,7 +26,7 @@ TERMINAL_RUN_STATUSES = {
 }
 ROLE_TOOL_MAP = {
     "planner": ["memory_query", "code_navigator"],
-    "executor": ["terminal_handler", "code_editor", "file_manager"],
+    "executor": ["terminal_handler", "code_editor_handler", "file_manager"],
     "verifier": ["terminal_handler", "debug_handler"],
     "researcher": ["memory_query", "file_manager"],
     "critic": ["code_navigator", "debug_handler"],

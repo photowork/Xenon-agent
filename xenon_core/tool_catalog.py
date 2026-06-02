@@ -5,6 +5,35 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set
 
 
+MODULE_NAME_ALIASES = {
+    "code_editor": "code_editor_handler",
+}
+
+
+def normalize_module_name(module_name: Any) -> str:
+    text = str(module_name or "").strip()
+    return MODULE_NAME_ALIASES.get(text, text)
+
+
+def normalize_module_names(module_names: List[Any]) -> tuple[List[str], List[str]]:
+    normalized_names: List[str] = []
+    alias_messages: List[str] = []
+
+    for module_name in module_names:
+        raw_name = str(module_name or "").strip()
+        if not raw_name:
+            continue
+
+        normalized_name = normalize_module_name(raw_name)
+        if normalized_name != raw_name:
+            alias_messages.append(f"↪ {raw_name} -> {normalized_name}: 已按模块别名规范化")
+
+        if normalized_name not in normalized_names:
+            normalized_names.append(normalized_name)
+
+    return normalized_names, alias_messages
+
+
 def authorize_single_tool(
     loaded_single_tools: Dict[str, Dict[str, Any]],
     approved_tools: Set[str],
@@ -228,6 +257,9 @@ def handle_load_module_call(
         module_names = arguments.get("module_names", [])
         if isinstance(module_names, str):
             module_names = [module_names]
+        elif not isinstance(module_names, list):
+            module_names = [module_names]
+        module_names, alias_messages = normalize_module_names(module_names)
 
         if not module_names:
             error_msg = "错误：请提供至少一个模块名称。"
@@ -237,7 +269,7 @@ def handle_load_module_call(
 
         print_fn(f"\n\033[38;2;195;197;64m加载模块: \033[0m\033[38;2;195;197;64m{module_names}\033[0m")
         all_tool_list = get_tool_list_fn()
-        loaded_info: List[str] = []
+        loaded_info: List[str] = list(alias_messages)
         already_loaded: List[str] = []
 
         for module_name in module_names:
