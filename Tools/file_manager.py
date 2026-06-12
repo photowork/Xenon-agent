@@ -110,6 +110,8 @@ class FileManager:
     DEFAULT_PAGE_SIZE = 50
     # 最大允许返回条目数
     MAX_HARD_LIMIT = 1000
+    # 单次工具结果中允许返回的最大文本字符数
+    MAX_CHUNK_SIZE = 5000
 
     def __init__(self, base_path: str = "."):
         """
@@ -852,14 +854,27 @@ class FileManager:
                           chunk_index: int = 0,
                           chunk_size: int = None,
                           encoding: str = 'utf-8') -> Dict[str, Any]:
-        """分块读取大文件，避免一次性加载到内存"""
+        """顺序分块读取文本文件，每次返回一个完整且不重叠的块。
+
+        :param file_path: 要读取的文本文件路径。
+        :param chunk_index: 从 0 开始的块索引。继续读取时必须使用返回的 next_chunk_index。
+        :param chunk_size: 每块字符数；最大 5000，超过时会自动限制为 5000，避免块内容被截断。
+        :param encoding: 首选文本编码，解码失败时会自动尝试其他常见编码。
+        :return: 当前块内容及 has_more、next_chunk_index、next_arguments 等续读信息。
+        """
         try:
             target = self._resolve_path(file_path)
             if not target.exists() or not target.is_file():
                 return {"success": False, "error": "文件不存在或不是文件"}
 
-            chunk_size = chunk_size or 15000
-            max_safe = 5000
+            if chunk_index < 0:
+                return {"success": False, "error": "块索引不能小于 0"}
+
+            requested_chunk_size = self.MAX_CHUNK_SIZE if chunk_size is None else chunk_size
+            if requested_chunk_size <= 0:
+                return {"success": False, "error": "块大小必须大于 0"}
+
+            chunk_size = min(requested_chunk_size, self.MAX_CHUNK_SIZE)
 
             content, used_enc = self._read_with_fallback(target, encoding)
             total_chars = len(content)
@@ -871,9 +886,25 @@ class FileManager:
             start = chunk_index * chunk_size
             end = min(start + chunk_size, total_chars)
             chunk_content = content[start:end]
-
-            is_truncated = len(chunk_content) > max_safe
-            display = chunk_content[:max_safe] if is_truncated else chunk_content
+            has_more = chunk_index + 1 < total_chunks
+            next_chunk_index = chunk_index + 1 if has_more else None
+            previous_chunk_index = chunk_index - 1 if chunk_index > 0 else None
+            next_arguments = (
+                {
+                    "file_path": str(target),
+                    "chunk_index": next_chunk_index,
+                    "chunk_size": chunk_size,
+                    "encoding": used_enc,
+                }
+                if has_more
+                else None
+            )
+            message = (
+                f"第 {chunk_index + 1}/{total_chunks} 块读取完成；"
+                f"继续读取请使用 next_chunk_index={next_chunk_index}"
+                if has_more
+                else f"第 {chunk_index + 1}/{total_chunks} 块读取完成；已到文件末尾"
+            )
 
             return {
                 "success": True,
@@ -882,10 +913,21 @@ class FileManager:
                 "total_chunks": total_chunks,
                 "total_chars": total_chars,
                 "chunk_size": chunk_size,
-                "content": display,
+                "requested_chunk_size": requested_chunk_size,
+                "chunk_size_adjusted": requested_chunk_size != chunk_size,
+                "start_char": start,
+                "end_char": end,
+                "content": chunk_content,
                 "encoding": used_enc,
-                "truncated": is_truncated,
-                "message": f"第 {chunk_index + 1}/{total_chunks} 块",
+                "content_complete": True,
+                "truncated": False,
+                "has_more": has_more,
+                "is_last_chunk": not has_more,
+                "previous_chunk_index": previous_chunk_index,
+                "next_chunk_index": next_chunk_index,
+                "remaining_chunks": total_chunks - chunk_index - 1,
+                "next_arguments": next_arguments,
+                "message": message,
             }
         except Exception as e:
             return {"success": False, "error": f"分块读取失败: {str(e)}"}

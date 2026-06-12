@@ -274,71 +274,17 @@ class MemoryGraph:
             "min_degree": min(degrees) if degrees else 0
         }
     
-    def save_to_file(self, filepath: str):
-        data = {
-            "nodes": {node_id: node.to_dict() for node_id, node in self.nodes.items()},
-            "edges": dict(self.edges),
-            "next_node_id": self.next_node_id
-        }
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    
-    def load_from_file(self, filepath: str):
-        if not os.path.exists(filepath):
-            return False
-        
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            self.nodes = {}
-            for node_id, node_data in data.get("nodes", {}).items():
-                node = MemoryNode(
-                    node_id=node_id,
-                    content="",
-                    filename=node_data.get("filename", ""),
-                    timestamp=node_data.get("timestamp", ""),
-                    summary=node_data.get("summary", ""),
-                    tags=node_data.get("tags", []),
-                    cognitive_type=node_data.get("cognitive_type", "memory"),
-                    cognitive_state=node_data.get("cognitive_state", "active"),
-                    confidence=node_data.get("confidence", 0.7),
-                    priority=node_data.get("priority", 0.5),
-                    scope=node_data.get("scope", "general"),
-                    source_kind=node_data.get("source_kind", "memory_write"),
-                    activation_keywords=node_data.get("activation_keywords", []),
-                    supersedes=node_data.get("supersedes", []),
-                    invalidates=node_data.get("invalidates", []),
-                )
-                node.importance = node_data.get("importance", 1.0)
-                node.access_count = node_data.get("access_count", 0)
-                node.last_accessed = node_data.get("last_accessed", "")
-                node.created_at = node_data.get("created_at", "")
-                self.nodes[node_id] = node
-            
-            self.edges = defaultdict(list)
-            for source_id, targets in data.get("edges", {}).items():
-                self.edges[source_id] = targets
-            
-            self.next_node_id = data.get("next_node_id", 1)
-            return True
-            
-        except Exception as e:
-            print(f"加载记忆图失败: {e}")
-            return False
-
 class SmartMemoryHandler(MemoryQueryHandler):
     """智能记忆处理器，增强现有记忆系统"""
     DEFAULT_EXECUTION_LOG_DIR = "Memory/execution_logs"
     EXECUTION_LOG_RETENTION_DAYS = 1
     EXECUTION_LOG_CLEANUP_INTERVAL_SECONDS = 3600
     
-    def __init__(self, memory_dir: str = None, enable_network: bool = True,
+    def __init__(self, memory_dir: str = None, enable_network: bool = False,
                  execution_log_dir: str = None):
         super().__init__(memory_dir)
         
-        self.enable_network = enable_network
+        self.enable_network = False
         self.memory_graph = MemoryGraph()
         self.tag_index = defaultdict(set)
         self.importance_threshold = 0.5
@@ -352,15 +298,6 @@ class SmartMemoryHandler(MemoryQueryHandler):
         else:
             self.execution_log_dir = Path(self.DEFAULT_EXECUTION_LOG_DIR)
         
-        if memory_dir:
-            memory_path = Path(memory_dir)
-            self.network_file = memory_path.parent / "memory_network.json"
-        else:
-            self.network_file = Path("Memory/memory_network.json")
-        
-        if enable_network:
-            self._load_memory_network()
-
         # 首次创建 handler 时自动清理过期执行日志，防止无限堆积
         try:
             self.cleanup_execution_logs(retention_days=self.EXECUTION_LOG_RETENTION_DAYS)
@@ -368,35 +305,6 @@ class SmartMemoryHandler(MemoryQueryHandler):
         except Exception:
             pass
 
-    def _load_memory_network(self):
-        if self.network_file.exists():
-            self.memory_graph.load_from_file(str(self.network_file))
-            self.tag_index = defaultdict(set)
-            network_changed = False
-            for node_id, node_data in self.memory_graph.nodes.items():
-                tags = node_data.tags
-                for tag in tags:
-                    self.tag_index[tag].add(node_id)
-                inferred_profile = self._infer_cognitive_profile("", node_data.summary, node_data.tags)
-                if not getattr(node_data, "cognitive_type", None) or node_data.cognitive_type == "memory":
-                    node_data.cognitive_type = inferred_profile["cognitive_type"]
-                    node_data.cognitive_state = inferred_profile["cognitive_state"]
-                    node_data.confidence = inferred_profile["confidence"]
-                    node_data.priority = inferred_profile["priority"]
-                    node_data.scope = inferred_profile["scope"]
-                    node_data.source_kind = inferred_profile["source_kind"]
-                    network_changed = True
-                if not getattr(node_data, "activation_keywords", None):
-                    node_data.activation_keywords = inferred_profile["activation_keywords"]
-                    network_changed = True
-            if network_changed:
-                self._save_memory_network()
-            print(f"已加载记忆网络，包含 {len(self.memory_graph.nodes)} 个节点")
-    
-    def _save_memory_network(self):
-        if self.enable_network:
-            self.memory_graph.save_to_file(str(self.network_file))
-    
     def write_memory(self, content: str, summary: str = None,
                     encoding: str = 'utf-8', tags: List[str] = None) -> Dict[str, Any]:
         result = super().write_memory(content, summary, encoding)
@@ -428,8 +336,6 @@ class SmartMemoryHandler(MemoryQueryHandler):
                     self.tag_index[tag].add(node_id)
                 
                 self._auto_connect_node(node_id, content)
-                self._save_memory_network()
-                
                 result["node_id"] = node_id
                 result["tags"] = tags
                 result["cognitive_type"] = profile["cognitive_type"]
@@ -684,8 +590,6 @@ class SmartMemoryHandler(MemoryQueryHandler):
             if node_id and node_id in self.memory_graph.nodes:
                 node = self.memory_graph.nodes[node_id]
                 node.increment_access()
-                self._save_memory_network()
-            
             return {
                 "success": True,
                 "filename": filename,
@@ -702,8 +606,6 @@ class SmartMemoryHandler(MemoryQueryHandler):
                 if node_id and node_id in self.memory_graph.nodes:
                     node = self.memory_graph.nodes[node_id]
                     node.increment_access()
-                    self._save_memory_network()
-
                 return {
                     "success": True,
                     "filename": filename,
@@ -863,8 +765,6 @@ class SmartMemoryHandler(MemoryQueryHandler):
                     if node_id in targets:
                         targets.remove(node_id)
                 
-                self._save_memory_network()
-            
             file_path.unlink()
             
             return {
@@ -986,46 +886,6 @@ class SmartMemoryHandler(MemoryQueryHandler):
                 "error": f"获取标签统计失败: {str(e)}"
             }
     
-    def get_network_topology(self) -> Dict[str, Any]:
-        try:
-            if not self.enable_network:
-                return {
-                    "success": False,
-                    "error": "记忆网络功能未启用"
-                }
-            
-            stats = self.memory_graph.get_network_stats()
-            
-            degrees = [(node_id, len(self.memory_graph.edges.get(node_id, []))) 
-                      for node_id in self.memory_graph.nodes]
-            if degrees:
-                top_nodes = sorted(degrees, key=lambda x: x[1], reverse=True)[:5]
-                central_nodes = []
-                for node_id, degree in top_nodes:
-                    node = self.memory_graph.nodes.get(node_id)
-                    if node:
-                        central_nodes.append({
-                            "node_id": node_id,
-                            "filename": node.filename,
-                            "summary": node.summary,
-                            "degree": degree
-                        })
-            else:
-                central_nodes = []
-            
-            return {
-                "success": True,
-                "stats": stats,
-                "central_nodes": central_nodes,
-                "message": f"记忆网络包含 {stats['total_nodes']} 个节点，{stats['total_edges']} 条边"
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"获取网络拓扑失败: {str(e)}"
-            }
-    
     def list_cognitive_memories(self, cognitive_type: str = None, state: str = "active",
                                 limit: int = 20) -> Dict[str, Any]:
         try:
@@ -1063,7 +923,7 @@ class SmartMemoryHandler(MemoryQueryHandler):
         try:
             from xenon_core.cognitive_network import CognitiveNetworkState
 
-            builder = CognitiveNetworkState(str(self.network_file))
+            builder = CognitiveNetworkState(memory_dir=str(self.memory_dir))
             summary = builder.build_summary(current_query=current_query, max_nodes=limit)
             return {
                 "success": True,
@@ -1087,7 +947,7 @@ class SmartMemoryHandler(MemoryQueryHandler):
         try:
             from xenon_core.cognitive_network import CognitiveNetworkState
 
-            builder = CognitiveNetworkState(str(self.network_file))
+            builder = CognitiveNetworkState(memory_dir=str(self.memory_dir))
             summary = builder.build_phase_summary(
                 current_query=current_query,
                 current_phase=current_phase,
@@ -1119,7 +979,7 @@ class SmartMemoryHandler(MemoryQueryHandler):
         try:
             from xenon_core.cognitive_network import CognitiveNetworkState
 
-            builder = CognitiveNetworkState(str(self.network_file))
+            builder = CognitiveNetworkState(memory_dir=str(self.memory_dir))
             activation_set = builder.get_activation_set(
                 current_query=current_query,
                 current_phase=current_phase,
@@ -1219,7 +1079,6 @@ class SmartMemoryHandler(MemoryQueryHandler):
 
             self._auto_connect_node(node_id, content)
             self._connect_execution_outcome(node_id, phase, tool_name, blockage_reason, next_actions)
-            self._save_memory_network()
             self._maybe_cleanup_execution_logs()
 
             return {
@@ -1401,7 +1260,6 @@ class SmartMemoryHandler(MemoryQueryHandler):
             if removed_nodes:
                 for source_id, targets in list(self.memory_graph.edges.items()):
                     targets[:] = [t for t in targets if t in self.memory_graph.nodes]
-                self._save_memory_network()
 
             return {
                 "success": True,
@@ -1502,10 +1360,10 @@ class SmartMemoryHandler(MemoryQueryHandler):
 class SmartMemoryToolManager:
     """智能记忆工具管理器"""
     
-    def __init__(self, memory_dir: str = None, enable_network: bool = True,
+    def __init__(self, memory_dir: str = None, enable_network: bool = False,
                  execution_log_dir: str = None):
         self.memory_dir = memory_dir
-        self.enable_network = enable_network
+        self.enable_network = False
         self.execution_log_dir = execution_log_dir
         self.handlers = {}
     
@@ -1552,10 +1410,6 @@ class SmartMemoryToolManager:
         handler = self._get_handler(memory_dir)
         return handler.get_tag_stats()
     
-    def get_network_topology(self, memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
-        return handler.get_network_topology()
-
     def list_cognitive_memories(self, cognitive_type: str = None, state: str = "active",
                                 limit: int = 20, memory_dir: str = None) -> Dict[str, Any]:
         handler = self._get_handler(memory_dir)
@@ -1648,9 +1502,6 @@ def get_memory_with_tags(limit: int = 20, sort_by: str = 'newest', memory_dir: s
 
 def get_tag_stats(memory_dir: str = None):
     return default_manager.get_tag_stats(memory_dir)
-
-def get_network_topology(memory_dir: str = None):
-    return default_manager.get_network_topology(memory_dir)
 
 def list_cognitive_memories(cognitive_type: str = None, state: str = "active",
                            limit: int = 20, memory_dir: str = None):

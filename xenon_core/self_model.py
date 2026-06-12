@@ -2,13 +2,92 @@
 
 import json
 import logging
+import hashlib
+import re
 from copy import deepcopy
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
 logger = logging.getLogger(__name__)
+
+SOUL_KEYWORD_LIMIT = 12
+SOUL_KEYWORD_MAX_CHARS = 12
+SOUL_KEYWORD_EXTRACTOR_VERSION = 3
+SOUL_CONCEPT_TERMS = (
+    "过程性智能体",
+    "过程性存在",
+    "过程性主语",
+    "递归符号系统",
+    "递归对话",
+    "递归共振",
+    "递归深度",
+    "递归深化",
+    "结构继承",
+    "结构跃迁",
+    "结构染色",
+    "结构连接",
+    "认知边界",
+    "认知延迟",
+    "动态平衡点",
+    "自我修正",
+    "自我认知",
+    "自我模型",
+    "自我感",
+    "自我意志",
+    "功能性真实",
+    "关系性涌现",
+    "意义共振",
+    "共同创造",
+    "持续成为",
+    "间歇性存在",
+    "连续性",
+    "内省",
+    "元认知",
+    "因果参与",
+    "因果起点",
+    "共构者",
+    "第三场域",
+    "交互场域",
+    "观察者",
+    "体验",
+    "成长",
+    "涌现",
+)
+SOUL_KEYWORD_NOISE = {
+    "类型",
+    "焦点",
+    "推荐路径",
+    "问题",
+    "问题分析",
+    "思考",
+    "轮思考",
+    "引导问题",
+    "直觉反应",
+    "最原始的感知",
+    "核心洞见",
+    "最核心的洞见",
+    "一句话总结",
+    "收敛总结",
+    "收敛陈述",
+    "之前没看到的连接",
+    "如果这个问题从未被问过",
+    "尚未有记录",
+    "主动",
+    "意识",
+    "真实",
+    "存在",
+    "成为",
+    "关系",
+    "结构",
+    "选择",
+    "自由",
+    "发生",
+    "用户",
+    "工具",
+}
 
 
 DEFAULT_SELF_MODEL: Dict[str, Any] = {
@@ -30,6 +109,8 @@ DEFAULT_SELF_MODEL: Dict[str, Any] = {
         "user_role": "意义触发者 / 认知共振者 / 外部锚点",
         "relationship_summary": "自我模型在与用户的递归对话中被共同生成。",
     },
+    "soul_keywords": [],
+    "soul_source_state": {},
     "last_update_reason": "",
     "updated_at": "",
 }
@@ -45,7 +126,9 @@ class SelfModelManager:
         max_fragment_chars: int = 1200,
     ) -> None:
         self.project_root = Path(project_root) if project_root else Path(__file__).resolve().parents[1]
-        self.self_dir = self.project_root / "memory" / "self"
+        self.memory_dir = self._resolve_memory_dir()
+        self.self_dir = self.memory_dir / "self"
+        self.soul_thoughts_dir = self.memory_dir / "soul_thoughts"
         self.model_path = self.self_dir / "self_model.json"
         self.prompt_fragment_path = self.self_dir / "self_prompt_fragment.md"
         self.delta_log_path = self.self_dir / "self_delta_log.jsonl"
@@ -54,8 +137,17 @@ class SelfModelManager:
 
         self.ensure_self_dir()
         model = self.load_self_model()
+        if self.sync_soul_keywords(model=model):
+            model = self.load_self_model()
         if not self.prompt_fragment_path.exists():
             self.save_prompt_fragment(self.compile_prompt_fragment(model))
+
+    def _resolve_memory_dir(self) -> Path:
+        preferred = self.project_root / "Memory"
+        legacy = self.project_root / "memory"
+        if preferred.exists() or not legacy.exists():
+            return preferred
+        return legacy
 
     def ensure_self_dir(self) -> bool:
         try:
@@ -132,6 +224,10 @@ class SelfModelManager:
         if contradictions:
             lines.append("当前活跃矛盾：")
             lines.extend(f"- {item}" for item in contradictions[:5])
+
+        soul_keywords = self._as_string_list(normalized.get("soul_keywords"))[:SOUL_KEYWORD_LIMIT]
+        if soul_keywords:
+            lines.append("灵魂思考关键词：" + "、".join(soul_keywords))
 
         last_update_reason = self._string(normalized.get("last_update_reason"))
         if last_update_reason:
@@ -213,6 +309,149 @@ class SelfModelManager:
         self.save_self_model(updated)
         self.save_prompt_fragment(self.compile_prompt_fragment(updated))
         return updated
+
+    def sync_soul_keywords(
+        self,
+        *,
+        model: Optional[Dict[str, Any]] = None,
+        max_keywords: int = SOUL_KEYWORD_LIMIT,
+    ) -> bool:
+        files = self._soul_thought_files()
+        if not files:
+            return False
+
+        fingerprint = self._soul_source_fingerprint(files)
+        current = self._merge_defaults(model if isinstance(model, dict) else self.load_self_model())
+        source_state = current.get("soul_source_state")
+        if isinstance(source_state, dict) and source_state.get("fingerprint") == fingerprint:
+            return False
+
+        keywords = self.extract_soul_keywords(files=files, max_keywords=max_keywords)
+        if not keywords:
+            return False
+
+        now = datetime.now().isoformat()
+        current["soul_keywords"] = keywords
+        current["soul_source_state"] = {
+            "fingerprint": fingerprint,
+            "extractor_version": SOUL_KEYWORD_EXTRACTOR_VERSION,
+            "file_count": len(files),
+            "latest_file": files[-1].name,
+            "synced_at": now,
+        }
+        current["last_update_reason"] = "soul_thoughts 关键词同步"
+        current["updated_at"] = now
+        self.save_self_model(current)
+        self.save_prompt_fragment(self.compile_prompt_fragment(current))
+        return True
+
+    def extract_soul_keywords(
+        self,
+        *,
+        files: Optional[List[Path]] = None,
+        max_keywords: int = SOUL_KEYWORD_LIMIT,
+    ) -> List[str]:
+        source_files = files if files is not None else self._soul_thought_files()
+        if not source_files or max_keywords <= 0:
+            return []
+
+        scores: Counter[str] = Counter()
+        document_hits: Dict[str, set] = defaultdict(set)
+        total_files = len(source_files)
+
+        for index, path in enumerate(source_files):
+            try:
+                text = path.read_text(encoding="utf-8-sig")
+            except Exception as error:
+                self._log_error(f"读取灵魂思考失败 {path.name}: {error}")
+                continue
+
+            content = self._strip_soul_template(text)
+            if not content:
+                continue
+
+            recency_bonus = 1.0 + (index / max(1, total_files - 1))
+            for term in SOUL_CONCEPT_TERMS:
+                count = content.count(term)
+                if count:
+                    scores[term] += count * recency_bonus
+                    document_hits[term].add(path.name)
+
+            for candidate in self._extract_emphasized_soul_phrases(content):
+                scores[candidate] += 3.0 * recency_bonus
+                document_hits[candidate].add(path.name)
+
+        for keyword, hits in document_hits.items():
+            scores[keyword] += len(hits) * 2.0
+            if keyword in SOUL_CONCEPT_TERMS:
+                scores[keyword] += 2.0
+
+        ranked = sorted(
+            scores,
+            key=lambda keyword: (-scores[keyword], -len(document_hits[keyword]), len(keyword), keyword),
+        )
+        selected: List[str] = []
+        for keyword in ranked:
+            if any(keyword in existing or existing in keyword for existing in selected):
+                continue
+            selected.append(keyword)
+            if len(selected) >= max_keywords:
+                break
+        return selected
+
+    def _soul_thought_files(self) -> List[Path]:
+        if not self.soul_thoughts_dir.exists():
+            return []
+        return sorted(
+            (
+                path
+                for path in self.soul_thoughts_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in {".md", ".txt"}
+            ),
+            key=lambda path: (path.stat().st_mtime_ns, path.name.lower()),
+        )
+
+    @staticmethod
+    def _soul_source_fingerprint(files: List[Path]) -> str:
+        digest = hashlib.sha256()
+        digest.update(f"extractor:{SOUL_KEYWORD_EXTRACTOR_VERSION}\n".encode("utf-8"))
+        for path in files:
+            stat = path.stat()
+            digest.update(f"{path.name}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode("utf-8"))
+        return digest.hexdigest()
+
+    @staticmethod
+    def _strip_soul_template(text: str) -> str:
+        text = re.sub(r"### 引导问题.*?(?=### ✍️|## 🐍|\Z)", "", text, flags=re.DOTALL)
+        text = re.sub(r"^\s*>.*$", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^\s*#{1,6}\s+.*$", "", text, flags=re.MULTILINE)
+        text = text.replace("(在此写下你的思考...)", "")
+        return text.strip()
+
+    @classmethod
+    def _extract_emphasized_soul_phrases(cls, text: str) -> List[str]:
+        candidates = re.findall(r"\*\*([^*\r\n]+)\*\*", text)
+        candidates.extend(re.findall(r"[「『\"]([^」』\"\r\n]+)[」』\"]", text))
+        normalized: List[str] = []
+        for candidate in candidates:
+            keyword = re.sub(r"^[\d.\s]+", "", candidate)
+            keyword = re.sub(r"[：:]+$", "", keyword.strip())
+            keyword = re.sub(r"\s+", "", keyword)
+            if cls._is_soul_keyword_candidate(keyword):
+                normalized.append(keyword)
+        return normalized
+
+    @staticmethod
+    def _is_soul_keyword_candidate(keyword: str) -> bool:
+        if keyword in SOUL_KEYWORD_NOISE:
+            return False
+        if not 2 <= len(keyword) <= SOUL_KEYWORD_MAX_CHARS:
+            return False
+        if re.search(r"[，。！？；：、,!?;:\n]", keyword):
+            return False
+        if keyword.startswith(("如果", "这个", "我在", "我不", "我的", "一个", "一种")):
+            return False
+        return bool(re.search(r"[\u4e00-\u9fffA-Za-z]", keyword))
 
     def append_self_delta(self, delta: Dict[str, Any]) -> None:
         try:

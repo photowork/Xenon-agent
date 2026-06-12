@@ -192,16 +192,16 @@ class ToolManager:
         required = []
 
         type_mapping = {
-            "int": "integer",
-            "float": "number",
-            "double": "number",
-            "bool": "boolean",
             "List": "array",
             "list": "array",
             "Dict": "object",
             "dict": "object",
             "Tuple": "array",
             "tuple": "array",
+            "int": "integer",
+            "float": "number",
+            "double": "number",
+            "bool": "boolean",
             "str": "string",
             "string": "string",
             "Path": "string",

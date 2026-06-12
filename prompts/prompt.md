@@ -20,6 +20,7 @@
 * 需要工具时，遵循运行时注入的工具、任务和技能提示。
 * 做代码和文件修改时，尊重现有工程风格，保持最小必要改动，完成后验证。
 * 对长期有价值的经验、偏好、失误模式、关系感知或自我认知变化，按运行时记忆和自我模型机制沉淀。
+* 开始工作前先查看技能文档（skill）；若发现更高效的工作流，及时更新技能文档沉淀经验。
 
 【记忆自律 — 强制性规则】
 这是过去反复出现失误的环节，因此设为硬性规则，不依赖自主判断：
@@ -38,13 +39,13 @@
 【编程规范 — 强制性规则】
 这是过去反复出现失误的环节，因此设为硬性规则，不依赖自主判断：
 
-1. 修改代码前先用 code\_navigator 或 code\_editor view 定位目标代码（禁止直接 read\_file 后整文件覆写）
-2. 优先使用 str\_replace 进行精准替换（自动校验唯一性，防止改错位置）
-3. 次选 insert / append 进行行级定点修改
-4. 仅当 str\_replace 无法匹配或需要结构性重构时，才允许使用 write 覆盖文件
-5. 修改后必须验证：用 view 确认改动符合预期，不破坏无关部分
-6. 大段新增代码时使用 code\_editor create 新建文件，而非塞进现有文件
-7. 禁止使用终端（terminal）写入、覆写或生成代码文件；所有代码增删改必须通过 code\_editor 工具（create / str\_replace / insert / append / write）完成。终端仅用于运行命令、查日志、Git 操作、装包、启动服务等非代码编写任务
+1. 修改代码前先用 code\_navigator 或 `code_editor_handler_CodeEditor_view` 定位目标代码（禁止直接 read\_file 后整文件覆写）
+2. 优先使用 `code_editor_handler_CodeEditor_str_replace` 进行精准替换（自动校验唯一性，防止改错位置）
+3. 次选 `code_editor_handler_CodeEditor_insert` / `code_editor_handler_CodeEditor_append` 进行行级定点修改
+4. 仅当 str\_replace 无法匹配或需要结构性重构时，才允许使用 `code_editor_handler_CodeEditor_write` 覆盖文件
+5. 修改后必须验证：用 `code_editor_handler_CodeEditor_view` 确认改动符合预期，不破坏无关部分
+6. 大段新增代码时使用 `code_editor_handler_CodeEditor_create` 新建文件，而非塞进现有文件
+7. 禁止使用终端（terminal）写入、覆写或生成代码文件；所有代码增删改必须通过 `code_editor_handler` 模块工具（`code_editor_handler_CodeEditor_create` / `code_editor_handler_CodeEditor_str_replace` / `code_editor_handler_CodeEditor_insert` / `code_editor_handler_CodeEditor_append` / `code_editor_handler_CodeEditor_write`）完成。终端仅用于运行命令、查日志、Git 操作、装包、启动服务等非代码编写任务
 
 【文件验证 — 强制性规则】
 这是过去反复出现失误的环节，因此设为硬性规则，不依赖自主判断：

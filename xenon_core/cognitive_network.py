@@ -96,10 +96,16 @@ class CognitiveNetworkState:
     """Load memories from memory_Write and .agent_history, score,
     rank, and produce compact summaries for context injection."""
 
-    def __init__(self, network_path: str = "Memory/memory_network.json"):
-        self._cache_path = Path(network_path)  # reuse path for scored index cache
-        self._write_dir = Path("Memory/memory_Write")
-        self._hist_dir = Path(".agent_history")
+    def __init__(
+        self,
+        network_path: Optional[str] = None,
+        memory_dir: str = "Memory/memory_Write",
+        history_dir: str = ".agent_history",
+    ):
+        # network_path is retained for compatibility with older callers. The
+        # cognitive index is now memory-only and is never persisted to disk.
+        self._write_dir = Path(memory_dir)
+        self._hist_dir = Path(history_dir)
 
         # in-memory index
         self._entries: List[Dict[str, Any]] = []   # scored memory entries
@@ -279,9 +285,6 @@ class CognitiveNetworkState:
         deduped.sort(key=lambda e: e.get("_score", 0.0), reverse=True)
 
         self._entries = deduped
-
-        # Persist cache
-        self._save_cache()
 
     def _parse_write_file(self, path: Path) -> Optional[Dict[str, Any]]:
         """Parse a memory_Write .txt file into a scored entry."""
@@ -617,25 +620,6 @@ class CognitiveNetworkState:
                 deduped.append(t)
                 seen.add(t)
         return deduped
-
-    # ── cache persistence ───────────────────────────────────────
-
-    def _save_cache(self) -> None:
-        """Persist scored entries to cache file for faster startup."""
-        try:
-            payload = {
-                "version": 2,
-                "updated_at": _now().isoformat(),
-                "entries": self._entries,
-            }
-            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cache_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-
 
 # Compatibility shorthand
 CognitiveNetworkState.__module__ = __name__

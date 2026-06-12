@@ -139,7 +139,7 @@ def bootstrap_agent(
 
     agent.tool_manager = tool_manager_cls()
     agent.task_chain_manager = task_chain_manager_cls()
-    agent.memory_manager = memory_manager_cls(memory_dir=memory_dir, enable_network=True)
+    agent.memory_manager = memory_manager_cls(memory_dir=memory_dir, enable_network=False)
     agent.execution_journal = execution_journal_cls()
     agent.recovery_manager = recovery_manager_cls()
     agent.agent_orchestrator = agent_orchestrator_cls()
@@ -189,7 +189,7 @@ def bootstrap_agent(
 
     agent.cognitive_network_summary = get_cognitive_network_summary_fn() or ""
     if agent.cognitive_network_summary:
-        print_fn("\033[38;2;111;208;104m[OK] Cognitive network initialized from Memory/memory_network.json\033[0m")
+        print_fn("\033[38;2;111;208;104m[OK] Cognitive network initialized from memory sources\033[0m")
 
     # Phase 4: 统一执行上下文 & 沙箱隔离
     agent.sandbox_context = create_default_context(workspace_root=str(Path.cwd()))

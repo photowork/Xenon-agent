@@ -88,6 +88,28 @@ class ToolRouter:
             ],
             "phases": ["analyze", "edit", "test", "maintenance"],
         },
+        "solidworks_handler": {
+            "keywords": [
+                "solidworks",
+                "cad",
+                "sldprt",
+                "sldasm",
+                "slddrw",
+                "sketch",
+                "extrude",
+                "feature",
+                "dimension",
+                "三维建模",
+                "零件",
+                "装配体",
+                "工程图",
+                "草图",
+                "拉伸",
+                "特征",
+                "尺寸",
+            ],
+            "phases": ["analyze", "edit", "test", "maintenance"],
+        },
     }
 
     DEFAULT_MODULES = [
@@ -331,6 +353,24 @@ class ToolRouter:
                         score += 4
                 if "gif" in text and "gif" in lowered:
                     score += 4
+
+            if module_name == "solidworks_handler":
+                solidworks_actions = {
+                    "sketch": ["create_sketch"],
+                    "草图": ["create_sketch"],
+                    "extrude": ["extrude_selected_sketch"],
+                    "拉伸": ["extrude_selected_sketch"],
+                    "feature": ["list_features"],
+                    "特征": ["list_features"],
+                    "dimension": ["get_dimension", "set_dimension"],
+                    "尺寸": ["get_dimension", "set_dimension"],
+                    "save": ["save"],
+                    "open": ["open"],
+                    "status": ["status"],
+                }
+                for keyword, preferred_names in solidworks_actions.items():
+                    if keyword in text and any(name in lowered for name in preferred_names):
+                        score += 5
 
             if recent_lessons:
                 score = self._apply_lesson_tool_score(tool_name, score, recent_lessons)

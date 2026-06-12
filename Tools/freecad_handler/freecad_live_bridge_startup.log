@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "D:\Xenon\agent_Xenon\Tools\freecad_handler\freecad_live_bridge.py", line 146, in <module>
+    start_bridge(_automatic_config)
+  File "D:\Xenon\agent_Xenon\Tools\freecad_handler\freecad_live_bridge.py", line 125, in start_bridge
+    XENON_LIVE_BRIDGE = XenonLiveBridge(config_path)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Xenon\agent_Xenon\Tools\freecad_handler\freecad_live_bridge.py", line 35, in __init__
+    self.port = int(self.config["port"])
+                    ~~~~~~~~~~~^^^^^^^^
+KeyError: 'port'

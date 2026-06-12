@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -44,7 +45,10 @@ def summarize_tool_payload_for_context(
     try:
         parsed = json.loads(text)
     except Exception:
-        parsed = None
+        try:
+            parsed = ast.literal_eval(text)
+        except Exception:
+            parsed = None
 
     if isinstance(parsed, dict):
         interesting_keys = [
@@ -58,6 +62,14 @@ def summarize_tool_payload_for_context(
             "count",
             "line_count",
             "size",
+            "chunk_index",
+            "total_chunks",
+            "chunk_size",
+            "has_more",
+            "is_last_chunk",
+            "next_chunk_index",
+            "remaining_chunks",
+            "content_complete",
         ]
         parts = []
         for key in interesting_keys:

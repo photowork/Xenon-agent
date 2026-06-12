@@ -308,14 +308,11 @@ def build_summary_conversation(
 
 
 def _build_cognitive_state_injection(summary_dir: Optional[Path] = None) -> str:
-    """Attempt to load cognitive network state from the network file near summary_dir."""
+    """Build cognitive state directly from the memory sources near summary_dir."""
     try:
         base = Path(summary_dir or get_project_memory_dir()).parent
-        network_path = base / "memory_network.json"
-        if not network_path.exists():
-            return ""
         from xenon_core.cognitive_network import CognitiveNetworkState
-        builder = CognitiveNetworkState(str(network_path))
+        builder = CognitiveNetworkState(memory_dir=str(base / "memory_Write"))
         cognitive_state = builder.build_summary(max_nodes=6, max_chars=1200)
         if cognitive_state:
             return "\n\nLong-term memory (cognitive network) — use these patterns to inform the checkpoint:\n" + cognitive_state
@@ -574,21 +571,17 @@ def inject_cognitive_state(
 ) -> bool:
     """Inject the most relevant long-term memories as a system message.
 
-    Loads the cognitive network state (activation set) from the memory graph
-    and inserts it after the leading system messages so the agent is aware
-    of relevant past patterns without manual retrieval.
+    Builds the cognitive activation set directly from memory sources and
+    inserts it after the leading system messages so the agent is aware of
+    relevant past patterns without manual retrieval.
 
     Call this before each LLM turn to keep the agent contextually grounded.
     """
     try:
         base = Path(summary_dir or get_project_memory_dir()).parent
-        network_path = base / "memory_network.json"
-        if not network_path.exists():
-            return False
-
         from xenon_core.cognitive_network import CognitiveNetworkState
 
-        builder = CognitiveNetworkState(str(network_path))
+        builder = CognitiveNetworkState(memory_dir=str(base / "memory_Write"))
         activation_set = builder.get_activation_set(
             current_query=current_query,
             current_phase=current_phase,
