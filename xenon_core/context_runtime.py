@@ -15,30 +15,83 @@ MAX_CONTEXT_TOKENS_DEFAULT = 50000
 OUTPUT_TOKEN_RESERVE = 8000
 TIKTOKEN_AVAILABLE = tiktoken is not None
 
+# DeepSeek V3 tokenizer 路径（相对于项目根目录）
+_DEFAULT_DS_TOKENIZER_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "AI_code" / "token计算" / "deepseek_v3_tokenizer"
+    / "deepseek_v3_tokenizer" / "tokenizer.json"
+)
+
 
 class TokenCounter:
-    """Token计数器类，用于估计和管理上下文token使用量"""
+    """Token计数器类，用于估计和管理上下文token使用量。
 
-    def __init__(self, model_name: str = "deepseek-v4-flash", *, logger: Any = None):
+    优先使用 DeepSeek V3 tokenizer（精确），
+    不可用时回退到 tiktoken cl100k_base。
+    """
+
+    def __init__(
+        self,
+        model_name: str = "deepseek-v4-flash",
+        *,
+        logger: Any = None,
+        ds_tokenizer_path: Optional[str] = None,
+    ):
         self.model_name = model_name
         self._logger = logger or logging.getLogger(__name__)
-        if not TIKTOKEN_AVAILABLE:
-            raise RuntimeError("tiktoken is not available")
+        self._ds_tokenizer = None  # tokenizers.Tokenizer 实例
 
-        try:
-            self.encoder = tiktoken.encoding_for_model(model_name)
-        except KeyError:
-            self.encoder = tiktoken.get_encoding("cl100k_base")
-        except Exception as error:
-            self._logger.error("初始化token编码器失败: %s", error)
-            raise
+        # 解析 DeepSeek tokenizer 路径
+        if ds_tokenizer_path is None and _DEFAULT_DS_TOKENIZER_PATH.exists():
+            ds_tokenizer_path = str(_DEFAULT_DS_TOKENIZER_PATH)
+
+        # 尝试加载 DeepSeek V3 tokenizer
+        if ds_tokenizer_path:
+            try:
+                from tokenizers import Tokenizer as HfTokenizer
+
+                self._ds_tokenizer = HfTokenizer.from_file(ds_tokenizer_path)
+                self._logger.info(
+                    "已加载 DeepSeek V3 tokenizer: %s", ds_tokenizer_path
+                )
+            except Exception as exc:
+                self._logger.warning(
+                    "加载 DeepSeek tokenizer 失败 (%s)，回退到 tiktoken", exc
+                )
+
+        # 回退到 tiktoken
+        if self._ds_tokenizer is None:
+            self.encoder = None
+            if TIKTOKEN_AVAILABLE:
+                try:
+                    self.encoder = tiktoken.encoding_for_model(model_name)
+                except KeyError:
+                    self.encoder = tiktoken.get_encoding("cl100k_base")
+                except Exception as error:
+                    self._logger.error("初始化 token 编码器失败: %s", error)
+            if self.encoder is None:
+                self._logger.warning(
+                    "无可用的 token 计数器（tiktoken 和 DeepSeek tokenizer 均不可用）"
+                )
+
+    @property
+    def using_deepseek_tokenizer(self) -> bool:
+        """是否正在使用 DeepSeek V3 tokenizer"""
+        return self._ds_tokenizer is not None
 
     def count_tokens(self, text: str) -> int:
+        """计算文本的 token 数。优先使用 DeepSeek tokenizer。"""
         if not text:
             return 0
-        return len(self.encoder.encode(text))
+        if self._ds_tokenizer is not None:
+            return len(self._ds_tokenizer.encode(text).ids)
+        if self.encoder is not None:
+            return len(self.encoder.encode(text))
+        return 0
 
-    def estimate_context_tokens(self, system_prompt: str, memories: List[str], current_query: str) -> int:
+    def estimate_context_tokens(
+        self, system_prompt: str, memories: List[str], current_query: str
+    ) -> int:
         total_tokens = 0
         total_tokens += self.count_tokens(system_prompt)
         for memory in memories:
@@ -79,7 +132,11 @@ class TokenCounter:
 
         return total_tokens
 
-    def estimate_total_tokens(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> int:
+    def estimate_total_tokens(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> int:
         total = 0
         for message in messages:
             total += self.estimate_messages_tokens([message])
@@ -336,17 +393,21 @@ def format_context_token_info(
     current_tools: List[Dict[str, Any]],
     context_manager: Any,
     logger: Any,
+    last_api_token_count: Optional[int] = None,
 ) -> str:
     if not context_manager or not getattr(context_manager, "token_counter", None):
         return ""
 
     try:
-        tokens = 0
-        tokens += context_manager.token_counter.count_tokens(system_message)
-        tokens += context_manager.token_counter.estimate_messages_tokens(messages)
-        if current_tools:
-            tools_json = json.dumps(current_tools, ensure_ascii=False)
-            tokens += context_manager.token_counter.count_tokens(tools_json)
+        if last_api_token_count is not None and last_api_token_count > 0:
+            tokens = last_api_token_count
+        else:
+            tokens = 0
+            tokens += context_manager.token_counter.count_tokens(system_message)
+            tokens += context_manager.token_counter.estimate_messages_tokens(messages)
+            if current_tools:
+                tools_json = json.dumps(current_tools, ensure_ascii=False)
+                tokens += context_manager.token_counter.count_tokens(tools_json)
 
         if tokens <= 0:
             return ""

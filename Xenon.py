@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Union, Tuple
 
-__version__ = "0.3.6"
+__version__ = "0.3.7"
 APP_VERSION = __version__
 
 from xenon_core.cognitive_network import CognitiveNetworkState
@@ -502,6 +502,14 @@ class AIAgent:
             max_files=20,
             use_dated_subdir=True,
         )
+        # 计算并缓存真实的 API 请求 token 数，供下一轮 _get_context_token_info 使用
+        try:
+            if self.context_manager and self.context_manager.token_counter:
+                self._last_api_token_count = self.context_manager.token_counter.estimate_total_tokens(
+                    messages, tools
+                )
+        except Exception:
+            pass
 
     def _save_turn_debug_trace(self, turn_messages: List[Dict[str, Any]]):
         core_save_turn_debug_trace(
@@ -596,6 +604,7 @@ class AIAgent:
             current_tools=self._get_current_tools(),
             context_manager=self.context_manager,
             logger=logger,
+            last_api_token_count=getattr(self, '_last_api_token_count', None),
         )
 
     def _build_semantic_router_catalog(self, tool_schemas: List[Dict[str, Any]]) -> str:
@@ -1275,6 +1284,7 @@ class AIAgent:
             emergency_context_clear_fn=self._emergency_context_clear,
             append_conversation_message_fn=self._append_conversation_message,
             save_api_request_fn=self._save_api_request,
+            save_api_usage_fn=lambda tokens: setattr(self, '_last_api_token_count', tokens),
             retry_request_fn=self._retry_request,
             create_completion_fn=self.client.chat.completions.create,
             process_streaming_response_fn=self._process_streaming_response,

@@ -61,3 +61,6 @@ Tools/mail_handler/mail_config.json
 Tools/ssh_handler/ssh_connections.json
 webui/sessions/
 config/*.json
+
+# === Runtime Logs ===
+memory_log.txt

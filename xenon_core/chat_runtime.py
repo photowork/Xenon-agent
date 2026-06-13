@@ -21,6 +21,7 @@ def run_chat_cycle(
     emergency_context_clear_fn: Callable[[List[Dict[str, Any]], bool], None],
     append_conversation_message_fn: Callable[[List[Dict[str, Any]], Dict[str, Any]], None],
     save_api_request_fn: Callable[[str, List[Dict[str, Any]], Optional[List[Dict[str, Any]]]], None],
+    save_api_usage_fn: Optional[Callable[[int], None]] = None,
     retry_request_fn: Callable[..., Any],
     create_completion_fn: Callable[..., Any],
     process_streaming_response_fn: Callable[[Any, List[Dict[str, Any]], List[Dict[str, Any]]], None],
@@ -90,6 +91,7 @@ def run_chat_cycle(
         if enable_streaming:
             try:
                 process_streaming_response_fn(response, messages, tools)
+                _capture_response_usage(response, save_api_usage_fn)
             except StreamTransportError as error:
                 logger.warning("流式响应中断，正在使用非流式请求重试一次: %s", error)
                 print_fn("\n[提示] 流式连接中断，正在用非流式方式重试一次...")
@@ -106,8 +108,10 @@ def run_chat_cycle(
                     **fallback_kwargs,
                 )
                 process_non_streaming_response_fn(fallback_response, messages, tools)
+                _capture_response_usage(fallback_response, save_api_usage_fn)
         else:
             process_non_streaming_response_fn(response, messages, tools)
+            _capture_response_usage(response, save_api_usage_fn)
 
     except interrupted_exception_cls:
         raise
@@ -271,3 +275,20 @@ def _ensure_plain_assistant_reasoning_content(
             "思考模式修复: 为 %d 条历史 assistant 消息补齐空 reasoning_content",
             patched,
         )
+
+
+def _capture_response_usage(
+    response: Any,
+    save_api_usage_fn: Optional[Callable[[int], None]],
+) -> None:
+    """从 API 响应中提取真实 token 用量并通过回调保存。"""
+    if save_api_usage_fn is None:
+        return
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            total = getattr(usage, "total_tokens", None)
+            if total is not None and total > 0:
+                save_api_usage_fn(int(total))
+    except Exception:
+        pass

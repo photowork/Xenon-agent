@@ -29,6 +29,8 @@ def build_chat_completion_kwargs(
         kwargs["tools"] = tools
     if stream is not None:
         kwargs["stream"] = stream
+        if stream:
+            kwargs["stream_options"] = {"include_usage": True}
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
     if temperature is not None:

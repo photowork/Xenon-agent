@@ -229,23 +229,61 @@ class Database:
     def delete_session(self, session_id: str) -> bool:
         with self._lock:
             session_path = self._get_session_path(session_id)
-            
+
             if not session_path.exists():
                 return False
-            
+
             # 删除文件
             session_path.unlink()
-            
+
             # 更新索引
             with self._safe_write_json(self.base_path / "sessions_index.json") as index:
                 if session_id in index:
                     del index[session_id]
-            
+
             # 清理文件锁
             if str(session_path) in self._file_locks:
                 del self._file_locks[str(session_path)]
-            
+
             return True
+
+    def evict_oldest_sessions(self, keep: int) -> List[str]:
+        """淘汰最旧的会话，保留最近 keep 个（按 created_at 排序）。
+
+        返回被淘汰的 session_id 列表，调用方负责清理对应的内存资源。
+        当会话数未超过 keep 时不执行任何操作。
+        """
+        with self._lock:
+            index = self._load_index()
+            if not index:
+                return []
+
+            # 按 created_at 升序排列（最旧的在前）
+            sorted_sessions = sorted(
+                index.items(),
+                key=lambda item: item[1].get("created_at", ""),
+            )
+
+            excess = len(sorted_sessions) - keep
+            if excess <= 0:
+                return []
+
+            evicted: List[str] = []
+            for session_id, _ in sorted_sessions[:excess]:
+                session_path = self._get_session_path(session_id)
+                if session_path.exists():
+                    try:
+                        session_path.unlink()
+                    except OSError:
+                        continue
+                del index[session_id]
+                evicted.append(session_id)
+
+            # 写回索引
+            with self._safe_write_json(self.base_path / "sessions_index.json") as idx:
+                idx.update(index)
+
+            return evicted
     
     def get_context(self, session_id: str) -> List[Dict[str, Any]]:
         session = self.get_session(session_id)

@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field, field_validator
 from openai import OpenAI
 import uvicorn
 
-from Xenon import AIAgent, AVAILABLE_MODELS, BASE_URL, API_KEY, MODEL, APP_VERSION
+from Xenon import AIAgent, AVAILABLE_MODELS, BASE_URL, API_KEY, MODEL, APP_VERSION, MAX_CONTEXT_TOKENS_DEFAULT
 from webui.database import Database
 from webui.stream_adapter import create_stream_adapter
 from xenon_core.runtime_health import (
@@ -123,7 +123,7 @@ WEBUI_CORS_ALLOW_CREDENTIALS = (
 
 # 配置常量
 MAX_MESSAGE_LENGTH = 10000  # 最大消息长度
-MAX_SESSIONS = 100  # 最大会话数量
+MAX_SESSIONS = 100  # 最大会话数量，达到上限后自动淘汰最旧的会话（滑动窗口）
 SESSION_THEME_MODEL = MODEL
 SESSION_THEME_MAX_LENGTH = 18
 SESSION_THEME_TIMEOUT = 12
@@ -634,16 +634,42 @@ async def health():
     }
 
 
+@app.get("/balance")
+async def get_balance():
+    """查询 DeepSeek 账户余额"""
+    try:
+        import aiohttp
+        headers = {"Authorization": f"Bearer {API_KEY}"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{BASE_URL}/user/balance", headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise HTTPException(status_code=resp.status, detail=f"DeepSeek API error: {text}")
+                data = await resp.json()
+                return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting balance: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/sessions")
 async def create_session(request: CreateSessionRequest, background_tasks: BackgroundTasks):
     try:
-        # 检查会话数量限制
+        # 达到上限时自动淘汰最旧的会话（滑动窗口）
         sessions = db.get_sessions()
         if len(sessions) >= MAX_SESSIONS:
-            raise HTTPException(
-                status_code=429, 
-                detail=f"已达到最大会话数量限制 ({MAX_SESSIONS})，请删除一些旧会话"
-            )
+            evicted = db.evict_oldest_sessions(keep=MAX_SESSIONS - 1)
+            for evicted_id in evicted:
+                with get_stream_lifecycle_lock(evicted_id):
+                    interrupt_session_stream(evicted_id, discard_agent=True)
+                agent_instances.delete(evicted_id)
+                agent_locks.delete(evicted_id)
+                active_streams.delete(evicted_id)
+                running_streams.delete(evicted_id)
+                stream_lifecycle_locks.delete(evicted_id)
+                logger.info("会话数已达上限，自动淘汰最旧会话: %s", evicted_id)
         
         session_model = resolve_model(request.model)
         seed_message = request.seed_message or request.title
@@ -735,6 +761,101 @@ async def update_session_model(session_id: str, request: ModelRequest):
         raise
     except Exception as e:
         logger.error(f"Error updating model for session {session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/sessions/{session_id}/usage")
+async def get_session_usage(session_id: str):
+    """返回当前会话的上下文 token 用量信息。"""
+    try:
+        require_session_id(session_id)
+        agent = agent_instances.get(session_id)
+        result = {
+            "context_tokens": 0,
+            "context_limit": MAX_CONTEXT_TOKENS_DEFAULT,
+            "percent": 0.0,
+        }
+        if agent is None or not hasattr(agent, "context_manager"):
+            return result
+
+        cm = agent.context_manager
+        tc = getattr(cm, "token_counter", None)
+        if tc is None:
+            return result
+
+        try:
+            # 优先使用运行时已经算好的 token 信息（与状态栏同步）
+            token_info_str = ""
+            try:
+                # AsyncAIAgentWrapper 没有 _get_context_token_info，直接调用底层 agent
+                inner = getattr(agent, "agent", None) or agent
+                get_info = getattr(inner, "_get_context_token_info", None)
+                if get_info:
+                    token_info_str = get_info()
+            except Exception:
+                pass
+
+            # 始终先获取 messages（后续两个分支都需要）
+            messages = getattr(agent, "current_context", [])
+            tools = []
+            system_msg = ""
+
+            # 从 token_info_str 中解析出 token 数值
+            tokens = 0
+            import re
+            match = re.search(r"Token使用量:\s*([\d,]+)", token_info_str)
+            if match:
+                tokens = int(match.group(1).replace(",", ""))
+            else:
+                # 回退到手动计算（与运行时的 format_context_token_info 完全一致）
+                try:
+                    system_msg = agent._get_available_tools_message() or ""
+                except Exception:
+                    pass
+                try:
+                    tools = agent._get_current_tools() or []
+                except Exception:
+                    pass
+
+                tokens = 0
+                if system_msg:
+                    tokens += tc.count_tokens(system_msg)
+                tokens += tc.estimate_messages_tokens(messages)
+                if tools:
+                    tools_json = json.dumps(tools, ensure_ascii=False)
+                    tokens += tc.count_tokens(tools_json)
+                # 加上认知网络摘要（API 提交时会注入）
+                try:
+                    cognitive = getattr(agent, "cognitive_network_summary", "")
+                    if cognitive:
+                        tokens += tc.count_tokens(str(cognitive))
+                except Exception:
+                    pass
+
+            limit = int(getattr(cm, "max_tokens_limit", MAX_CONTEXT_TOKENS_DEFAULT) or MAX_CONTEXT_TOKENS_DEFAULT)
+            if limit <= 0:
+                limit = MAX_CONTEXT_TOKENS_DEFAULT
+
+            percent = round(tc.get_token_usage_percentage(tokens, limit), 1)
+
+            result = {
+                "context_tokens": tokens,
+                "context_limit": limit,
+                "percent": percent,
+                "level": tc.get_token_usage_warning_level(tokens, limit),
+                "msg_count": len(messages),
+                "debug_system": bool(system_msg),
+                "debug_tools": len(tools),
+            }
+        except Exception as e:
+            logger.error(f"Usage calc error: {e}", exc_info=True)
+            result["error"] = str(e)
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting usage for session {session_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

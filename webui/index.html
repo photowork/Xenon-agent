@@ -173,6 +173,54 @@
             max-width: 220px;
         }
 
+        .context-usage {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            height: 28px;
+            padding: 0 14px;
+            background:
+                linear-gradient(90deg, #bde3b4 0 calc(100% - 14px), #4cab36 calc(100% - 14px));
+            color: var(--x-green);
+            border: 0;
+            border-radius: 0;
+            font-size: 0.84rem;
+            font-weight: 800;
+            white-space: nowrap;
+            transition: color 0.3s;
+        }
+
+        .context-usage .usage-label {
+            font-variant-numeric: tabular-nums;
+        }
+
+        .context-usage .usage-bar {
+            display: inline-block;
+            width: 56px;
+            height: 5px;
+            background: rgba(25, 73, 60, 0.22);
+            border-radius: 0;
+            overflow: hidden;
+            vertical-align: middle;
+        }
+
+        .context-usage .usage-bar-fill {
+            display: block;
+            height: 100%;
+            border-radius: 0;
+            transition: width 0.5s ease, background 0.3s;
+        }
+
+        .context-usage.level-low .usage-bar-fill     { background: #04632c; }
+        .context-usage.level-medium .usage-bar-fill  { background: #ffc107; }
+        .context-usage.level-high .usage-bar-fill    { background: #ff7043; }
+        .context-usage.level-critical .usage-bar-fill { background: #b95d4f; }
+
+        .context-usage.level-low     { color: #04632c; }
+        .context-usage.level-medium  { color: #b8860b; }
+        .context-usage.level-high    { color: #bf360c; }
+        .context-usage.level-critical { color: #b95d4f; }
+
         .model-select:focus {
             border-color: #00d4aa;
         }
@@ -1424,6 +1472,10 @@
             <div class="input-container">
                 <div class="input-meta">
                     <select class="model-select" id="modelSelect" aria-label="选择模型"></select>
+                    <span class="context-usage level-low" id="contextUsage" title="上下文 token 用量">
+                        <span class="usage-label">--/--</span>
+                        <span class="usage-bar"><span class="usage-bar-fill" style="width:0%"></span></span>
+                    </span>
                 </div>
                 <div class="input-wrapper">
                     <textarea 
@@ -1477,7 +1529,10 @@
             newChatBtn: document.getElementById('newChatBtn'),
             chatTitle: document.getElementById('chatTitle'),
             appVersion: document.getElementById('appVersion'),
-            modelSelect: document.getElementById('modelSelect')
+            modelSelect: document.getElementById('modelSelect'),
+            contextUsage: document.getElementById('contextUsage'),
+            contextUsageLabel: document.querySelector('.usage-label'),
+            contextUsageBar: document.querySelector('.usage-bar-fill')
         };
 
         function toggleSidebar() {
@@ -1596,6 +1651,64 @@
                     await loadMessages({ forceScroll: shouldAutoScrollMessages });
                 }
             }
+        }
+
+        // ─── 上下文用量显示 ───
+        let contextUsagePoller = null;
+        let contextUsagePollInFlight = false;
+
+        function formatTokens(n) {
+            if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+            if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
+            return String(n);
+        }
+
+        async function updateContextUsage(sessionId) {
+            if (!sessionId || sessionId !== currentSessionId || contextUsagePollInFlight) return;
+
+            contextUsagePollInFlight = true;
+            try {
+                const response = await fetch(`${API_BASE}/sessions/${sessionId}/usage`);
+                if (!response.ok) return;
+                const data = await response.json();
+
+                const tokens = data.context_tokens || 0;
+                const limit = data.context_limit || 900000;
+                const percent = data.percent || 0;
+                const level = data.level || 'low';
+
+                const el = elements.contextUsage;
+                const label = elements.contextUsageLabel;
+                const bar = elements.contextUsageBar;
+
+                if (label) label.textContent = `${formatTokens(tokens)}/${formatTokens(limit)} (${percent}%)`;
+                if (bar) bar.style.width = `${Math.min(percent, 100)}%`;
+
+                if (el) {
+                    el.className = `context-usage level-${level}`;
+                    el.title = `Token 用量: ${tokens.toLocaleString()} / ${limit.toLocaleString()} (${percent}%) - 状态: ${level}`;
+                }
+            } catch (error) {
+                // silent fail
+            } finally {
+                contextUsagePollInFlight = false;
+            }
+        }
+
+        function startContextUsagePolling() {
+            stopContextUsagePolling();
+            contextUsagePoller = setInterval(() => {
+                updateContextUsage(currentSessionId);
+            }, 3000);
+            updateContextUsage(currentSessionId);
+        }
+
+        function stopContextUsagePolling() {
+            if (contextUsagePoller) {
+                clearInterval(contextUsagePoller);
+                contextUsagePoller = null;
+            }
+            contextUsagePollInFlight = false;
         }
 
         async function loadSessions(options = {}) {
@@ -1742,6 +1855,7 @@
             if (refreshSessions) {
                 await loadSessions({ selectLatest: false });
             }
+            startContextUsagePolling();
         }
 
         function isMessagesNearBottom() {
@@ -1772,6 +1886,7 @@
                 elements.chatTitle.textContent = sessionData.title;
                 currentModel = sessionData.model || currentModel;
                 syncModelSelect();
+                updateContextUsage(sessionIdForLoad);
             } catch (error) {
                 console.error('Failed to load messages:', error);
             }

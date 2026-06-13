@@ -346,6 +346,27 @@ class AsyncAIAgentWrapper:
 
     def get_model(self) -> str:
         return self.adapter.get_model()
+    # ── 属性穿透：暴露底层 AIAgent 的关键属性给 WebUI 使用 ──
+    @property
+    def context_manager(self):
+        return getattr(self.agent, "context_manager", None)
+
+    @property
+    def system_prompt(self):
+        return getattr(self.agent, "system_prompt", None)
+
+    @property
+    def current_context(self):
+        return getattr(self.agent, "current_context", [])
+
+    def _get_current_tools(self):
+        return getattr(self.agent, "_get_current_tools", lambda: [])()
+
+    def _get_available_tools_message(self, *args, **kwargs):
+        fn = getattr(self.agent, "_get_available_tools_message", None)
+        if fn:
+            return fn(*args, **kwargs)
+        return ""
 
 
 def create_stream_adapter(agent) -> AsyncAIAgentWrapper:
