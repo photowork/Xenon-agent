@@ -52,7 +52,6 @@ Thumbs.db
 AI_code/
 
 # === Sensitive Credentials — DO NOT COMMIT ===
-deepseekconfig.py
 Tools/vision_tool.py
 Tools/*/credentials.json
 Tools/tts_handler/qwen3-tts-flash.txt
