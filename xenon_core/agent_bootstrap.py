@@ -158,6 +158,7 @@ def bootstrap_agent(
     agent._pending_user_inputs = []
     agent._pending_user_input_limit = 8
     agent._autonomous_running = False
+    agent._turn_running = False
     agent.orchestration_decision = None
     agent.last_tool_result = None
     agent.last_recovery_plan = None

@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Union, Tuple
 
-__version__ = "0.3.7"
+__version__ = "0.3.8"
 APP_VERSION = __version__
 
 from xenon_core.cognitive_network import CognitiveNetworkState
@@ -1216,6 +1216,17 @@ class AIAgent:
             self.interrupted = True
             return self.queue_pending_user_input(user_input)
 
+        # ★ 正常对话中，如果轮次正在运行（工具调用中），入队而非打断
+        if getattr(self, "_turn_running", False):
+            result = self.queue_pending_user_input(user_input)
+            if self._stream_callback:
+                self._stream_callback({
+                    "type": "user_queued",
+                    "content": user_input,
+                    "queue_position": result.get("pending_count", 0),
+                })
+            return result
+
         reset_loaded_tools_fn = self._reset_loaded_tools_for_new_turn
         if CONTEXT_COMPACT_AFTER_TURN:
             reset_loaded_tools_fn = self._reset_loaded_tools_for_new_turn_without_notice
@@ -1239,8 +1250,51 @@ class AIAgent:
         return None
 
     def _process_chat_with_context(self, user_input: str, internal_context: Optional[Dict[str, Any]] = None):
-        """处理对话"""
+        """处理对话（支持排队消息：本轮完成后自动处理队列中的消息）"""
         self._active_user_input = user_input
+        self._turn_running = True
+        try:
+            self._run_single_turn(user_input, internal_context)
+        finally:
+            self._turn_running = False
+
+        # ★ 处理排队消息：本轮完成后，依次处理队列中的消息
+        while self._pending_user_inputs:
+            pending = self._pending_user_inputs.pop(0)
+            self._turn_running = True
+            try:
+                # 通知前端正在处理排队消息
+                if self._stream_callback:
+                    self._stream_callback({
+                        "type": "queue_processing",
+                        "content": pending,
+                        "queue_remaining": len(self._pending_user_inputs),
+                    })
+                # 排队消息也需要经过完整的 entry 预处理（工具重置、上下文清理、附加用户消息）
+                self._decay_recent_tool_results(pending)
+                self._active_user_input = pending
+                reset_loaded_tools_fn = self._reset_loaded_tools_for_new_turn
+                if CONTEXT_COMPACT_AFTER_TURN:
+                    reset_loaded_tools_fn = self._reset_loaded_tools_for_new_turn_without_notice
+
+                core_handle_user_chat_entry(
+                    user_input=pending,
+                    current_context=self.current_context,
+                    decay_recent_tool_results_fn=lambda _: None,  # 已在上面调用
+                    set_interrupted_fn=lambda value: setattr(self, "interrupted", value),
+                    set_active_user_input_fn=lambda value: setattr(self, "_active_user_input", value),
+                    reset_loaded_tools_for_new_turn_fn=reset_loaded_tools_fn,
+                    find_pending_tool_call_ids_fn=self._find_pending_tool_call_ids,
+                    append_conversation_message_fn=self._append_conversation_message,
+                    cleanup_reasoning_content_fn=self._cleanup_reasoning_content_for_next_request,
+                    process_chat_with_context_fn=self._run_single_turn,
+                    logger=logger,
+                )
+            finally:
+                self._turn_running = False
+
+    def _run_single_turn(self, user_input: str, internal_context: Optional[Dict[str, Any]] = None):
+        """执行单轮对话（被 _process_chat_with_context 和排队处理器复用）"""
         core_run_chat_turn(
             user_input=user_input,
             internal_context=internal_context,
@@ -1271,6 +1325,18 @@ class AIAgent:
         )
 
     def _chat(self, messages: List[Dict], tools: List[Dict], model: str, _retry_count: int = 0):
+        # ★ 中途注入排队消息：在递归调用间隙检查队列，实现实时纠正
+        if _retry_count == 0 and getattr(self, "_turn_running", False) and self._pending_user_inputs:
+            pending = self._pending_user_inputs.pop(0)
+            self._append_conversation_message(messages, {"role": "user", "content": pending})
+            self._active_user_input = pending
+            if self._stream_callback:
+                self._stream_callback({
+                    "type": "queue_processing",
+                    "content": pending,
+                    "queue_remaining": len(self._pending_user_inputs),
+                })
+
         core_run_chat_cycle(
             messages=messages,
             tools=tools,
@@ -1338,7 +1404,35 @@ class AIAgent:
             logger=logger,
         )
 
+    def _try_inject_queued_messages(self, messages: List[Dict]):
+        """★ 中途注入：在工具执行间隙将排队消息注入到消息列表中"""
+        if not getattr(self, "_turn_running", False):
+            return False
+        # 短暂释放 GIL，让 FastAPI 线程有机会把消息放入队列
+        import time as _time
+        for _ in range(20):
+            if self._pending_user_inputs:
+                break
+            _time.sleep(0.01)
+        if not self._pending_user_inputs:
+            return False
+        pending = self._pending_user_inputs.pop(0)
+        self._append_conversation_message(messages, {"role": "user", "content": pending})
+        self._active_user_input = pending
+        print(f"\n[排队注入] 中途将排队消息注入到对话中: {pending[:80]}...", file=sys.stderr)
+        if self._stream_callback:
+            self._stream_callback({
+                "type": "queue_processing",
+                "content": pending,
+                "queue_remaining": len(self._pending_user_inputs),
+            })
+        return True
+
     def _process_streaming_response(self, response, messages: List[Dict], tools: List[Dict]):
+        def continue_with_injection(next_messages, next_tools, next_model):
+            self._try_inject_queued_messages(next_messages)
+            self._chat(next_messages, next_tools, next_model)
+
         core_process_streaming_response(
             response=response,
             messages=messages,
@@ -1351,17 +1445,17 @@ class AIAgent:
             save_memory_log_fn=self._save_memory_log,
             handle_tool_calls_fn=self._handle_tool_calls,
             get_current_tools_fn=self._get_current_tools,
-            continue_chat_fn=lambda next_messages, next_tools, next_model: self._chat(
-                next_messages,
-                next_tools,
-                next_model,
-            ),
+            continue_chat_fn=continue_with_injection,
             model_for_recursive_chat=self.get_model(),
             logger=logger,
             print_fn=print,
         )
 
     def _process_non_streaming_response(self, response, messages: List[Dict], tools: List[Dict]):
+        def continue_with_injection(next_messages, next_tools, next_model):
+            self._try_inject_queued_messages(next_messages)
+            self._chat(next_messages, next_tools, next_model)
+
         core_process_non_streaming_response(
             response=response,
             messages=messages,
@@ -1372,11 +1466,7 @@ class AIAgent:
             save_memory_log_fn=self._save_memory_log,
             handle_tool_calls_fn=self._handle_tool_calls,
             get_current_tools_fn=self._get_current_tools,
-            continue_chat_fn=lambda next_messages, next_tools, next_model: self._chat(
-                next_messages,
-                next_tools,
-                next_model,
-            ),
+            continue_chat_fn=continue_with_injection,
             model_for_recursive_chat=self.get_model(),
             logger=logger,
             print_fn=print,

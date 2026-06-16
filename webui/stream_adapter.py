@@ -41,6 +41,8 @@ class StreamEvent:
     tool_name: str = ""
     arguments: str = ""
     error: Optional[str] = None  # 新增错误字段，用于传递异常信息
+    queue_position: int = 0      # 排队消息在队列中的位置
+    queue_remaining: int = 0     # 队列中剩余消息数
 
 
 class AIAgentStreamAdapter:
@@ -128,7 +130,9 @@ class AIAgentStreamAdapter:
                 content=event_dict.get('content', ''),
                 tool_name=event_dict.get('tool_name', ''),
                 tool_call_id=event_dict.get('tool_call_id', ''),
-                arguments=event_dict.get('arguments', '')
+                arguments=event_dict.get('arguments', ''),
+                queue_position=event_dict.get('queue_position', 0),
+                queue_remaining=event_dict.get('queue_remaining', 0),
             )
             event_queue.put(event)
         
@@ -320,6 +324,16 @@ class AsyncAIAgentWrapper:
                 else:
                     close_generator()
     
+    def queue_message(self, message: str):
+        """将消息排入 agent 内部队列。在活跃流期间由 WebUI 调用。
+
+        直接调用 AIAgent.chat()，agent 会检测 _turn_running 并自动入队 +
+        通过当前活跃的 stream_callback 发送 user_queued 事件到 SSE 流。
+        """
+        if hasattr(self.agent, 'chat'):
+            return self.agent.chat(message)
+        return {"queued": False, "reason": "agent_does_not_support_queueing"}
+
     def interrupt(self):
         self.adapter.interrupt()
 

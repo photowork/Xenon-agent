@@ -54,7 +54,7 @@ pip install -r requirements.txt
 
 ### 配置环境变量
 
-创建 `.env` 文件（参考 `.env.example`）或直接设置系统环境变量：
+创建 `.env` 文件（可参考下方环境变量表）或直接设置系统环境变量：
 
 | 变量名 | 说明 | 必需 |
 |--------|------|------|
@@ -100,8 +100,6 @@ Xenon-agent/
 ├── deepseekconfig.py               # API 配置
 ├── requirements.txt                # Python 依赖
 ├── .gitignore                      # Git 忽略规则
-├── .env.example                    # 环境变量模板
-├── SECURITY.md                     # 安全策略
 ├── LICENSE                         # MIT 开源协议
 ├── xenon_logo.ico                  # 应用图标
 ├── start_Xenon.bat                 # 命令行启动脚本 (Windows)
@@ -164,6 +162,7 @@ Xenon-agent/
 │   ├── computational_engine.py     # 计算引擎
 │   ├── context_manager_tool.py     # 上下文管理
 │   ├── debug_handler.py            # 调试工具
+│   ├── ds_balance.py               # DeepSeek 余额查询
 │   ├── excel_handler.py            # Excel 处理
 │   ├── file_manager.py             # 文件管理
 │   ├── github_manager.py           # GitHub 管理
@@ -245,6 +244,7 @@ Xenon 的核心是递归对话架构：每一轮对话开始时会重新加载�
 | 技能管理 | 技能文档的读写与版本管理 | `load_module(['skill_handler'])` |
 | 3D 建模 | FreeCAD 参数化建模 | `load_module(['freecad_handler'])` |
 | 调试 | 日志分析、错误诊断 | `load_module(['debug_handler'])` |
+| DeepSeek 余额 | 查询 DeepSeek 账户余额 | `load_module(['ds_balance'])` |
 | 记忆查询 | 认知网络检索与关联分析 | `load_module(['memory_query_handler'])` |
 | 网页视频渲染 | 网页内容渲染为视频 | `load_module(['web_video_renderer'])` |
 | 终端 | 系统命令执行 | `load_module(['terminal_handler'])` |

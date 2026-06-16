@@ -457,6 +457,81 @@
             background: #e55a5a;
         }
 
+        .queue-btn {
+            padding: 12px 24px;
+            background: #f0a050;
+            color: #1a1a2e;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background 0.2s;
+            position: relative;
+        }
+
+        .queue-btn:hover:not(:disabled) {
+            background: #e09040;
+        }
+
+        .queue-btn:disabled {
+            background: #3a3a5a;
+            cursor: not-allowed;
+        }
+
+        .queue-btn .queue-badge {
+            position: absolute;
+            top: -6px;
+            right: -6px;
+            background: #ff6b6b;
+            color: #fff;
+            font-size: 0.7rem;
+            min-width: 18px;
+            height: 18px;
+            border-radius: 9px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+        }
+
+        .queued-message {
+            opacity: 0.65;
+            border-left: 3px solid #f0a050;
+            padding-left: 12px;
+        }
+
+        .queued-message .queue-status {
+            font-size: 0.78rem;
+            color: #f0a050;
+            margin-top: 4px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .queued-message .queue-status.processing {
+            color: #00d4aa;
+        }
+
+        .queue-spinner {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid #f0a050;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: queue-spin 0.8s linear infinite;
+        }
+
+        .queued-message .queue-status.processing .queue-spinner {
+            border-color: #00d4aa;
+            border-top-color: transparent;
+        }
+
+        @keyframes queue-spin {
+            to { transform: rotate(360deg); }
+        }
+
         .typing-indicator {
             display: flex;
             gap: 4px;
@@ -797,6 +872,7 @@
         .mobile-menu-btn:focus-visible,
         .send-btn:focus-visible,
         .stop-btn:focus-visible,
+        .queue-btn:focus-visible,
         .input-box:focus-visible {
             outline: none;
         }
@@ -806,7 +882,8 @@
         .session-action-toggle:focus-visible,
         .mobile-menu-btn:focus-visible,
         .send-btn:focus-visible,
-        .stop-btn:focus-visible {
+        .stop-btn:focus-visible,
+        .queue-btn:focus-visible {
             outline: 3px solid rgba(141, 209, 196, 0.76);
             outline-offset: 2px;
         }
@@ -1143,7 +1220,8 @@
         }
 
         .send-btn,
-        .stop-btn {
+        .stop-btn,
+        .queue-btn {
             position: relative;
             width: 52px;
             min-width: 52px;
@@ -1179,6 +1257,36 @@
         }
 
         .send-btn:disabled {
+            background: rgba(105, 124, 115, 0.5);
+            color: rgba(25, 73, 60, 0.55);
+        }
+
+        .queue-btn {
+            background: #f0a050;
+            overflow: visible;
+        }
+
+        .queue-btn::before {
+            content: "";
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 30px;
+            height: 36px;
+            background: #1a1a2e;
+            clip-path: polygon(100% 50%, 0% 96%, 26% 50%, 0% 4%);
+            transform: translate(-50%, -50%);
+        }
+
+        .queue-btn .queue-badge {
+            z-index: 2;
+        }
+
+        .queue-btn:hover:not(:disabled) {
+            background: var(--x-aqua-bright);
+        }
+
+        .queue-btn:disabled {
             background: rgba(105, 124, 115, 0.5);
             color: rgba(25, 73, 60, 0.55);
         }
@@ -1409,14 +1517,16 @@
             }
 
             .send-btn,
-            .stop-btn {
+            .stop-btn,
+            .queue-btn {
                 width: 48px;
                 min-width: 48px;
                 min-height: 48px;
                 padding: 0;
             }
 
-            .send-btn::before {
+            .send-btn::before,
+            .queue-btn::before {
                 width: 27px;
                 height: 32px;
             }
@@ -1516,6 +1626,7 @@
         let availableModels = [];
         let currentModel = null;
         let shouldAutoScrollMessages = true;
+        let pendingQueueCount = 0;
         const AUTO_SCROLL_BOTTOM_THRESHOLD = 80;
 
         const elements = {
@@ -2063,10 +2174,18 @@
                 currentThinkingEl = null;
                 currentContentEl = null;
                 currentToolProgressEl = null;
+                pendingQueueCount = 0;
                 updateSendButton();
                 const indicator = document.getElementById('typing-indicator');
                 if (indicator && indicator.parentNode) {
                     indicator.remove();
+                }
+                // 清理所有排队消息的样式
+                const queuedMessages = elements.messagesContainer.querySelectorAll('.queued-message');
+                for (const el of queuedMessages) {
+                    el.classList.remove('queued-message');
+                    const statusEl = el.querySelector('.queue-status');
+                    if (statusEl) statusEl.remove();
                 }
             };
 
@@ -2188,9 +2307,50 @@
                                         content: '错误: ' + data.content
                                     });
                                     scrollToBottom();
+                                } else if (data.type === 'user_queued') {
+                                    // 排队消息已被 agent 确认接收
+                                    pendingQueueCount = data.queue_position || 0;
+                                    updateSendButton();
+                                    // 查找最近的排队消息并更新其状态
+                                    const queuedMessages = elements.messagesContainer.querySelectorAll('.queued-message');
+                                    for (const el of queuedMessages) {
+                                        const statusEl = el.querySelector('.queue-status');
+                                        const label = statusEl ? statusEl.querySelector('.queue-label') : null;
+                                        if (label && label.textContent.includes('排队中')) {
+                                            label.textContent = `队列中 (#${data.queue_position || '?'})`;
+                                            break;
+                                        }
+                                    }
+                                    scrollToBottom();
+                                } else if (data.type === 'queue_processing') {
+                                    // 智能体开始处理排队消息
+                                    pendingQueueCount = data.queue_remaining || 0;
+                                    updateSendButton();
+                                    const queuedMessages = elements.messagesContainer.querySelectorAll('.queued-message');
+                                    for (const el of queuedMessages) {
+                                        const statusEl = el.querySelector('.queue-status');
+                                        if (statusEl) {
+                                            statusEl.className = 'queue-status processing';
+                                            const label = statusEl.querySelector('.queue-label');
+                                            if (label) {
+                                                label.textContent = '处理中...';
+                                            }
+                                        }
+                                        // 只更新第一个排队消息
+                                        break;
+                                    }
+                                    scrollToBottom();
                                 } else if (data.type === 'done') {
                                     collapseThinking();
                                     finishToolProgress();
+                                    pendingQueueCount = 0;
+                                    // 移除所有排队状态
+                                    const queuedMessages = elements.messagesContainer.querySelectorAll('.queued-message');
+                                    for (const el of queuedMessages) {
+                                        el.classList.remove('queued-message');
+                                        const statusEl = el.querySelector('.queue-status');
+                                        if (statusEl) statusEl.remove();
+                                    }
                                     await finishStream();
                                     return;
                                 }
@@ -2245,6 +2405,72 @@
                     type: 'error',
                     content: '发送失败: ' + error.message
                 });
+            }
+        }
+
+        async function queueMessage() {
+            const message = elements.inputBox.value.trim();
+            if (!message || !isStreaming) return;
+            if (!currentSessionId) return;
+
+            elements.inputBox.value = '';
+            elements.inputBox.style.height = 'auto';
+            pendingQueueCount++;
+            updateSendButton();
+
+            // 在聊天中显示排队消息
+            const queuedId = 'queued-' + Date.now();
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message user queued-message';
+            messageDiv.id = queuedId;
+            messageDiv.innerHTML = `
+                <div class="message-content">${escapeHtml(message)}</div>
+                <div class="queue-status">
+                    <span class="queue-spinner"></span>
+                    <span class="queue-label">排队中...</span>
+                </div>
+            `;
+            elements.messagesContainer.appendChild(messageDiv);
+            scrollToBottom({ force: true });
+
+            try {
+                const response = await fetch(`${API_BASE}/chat/${currentSessionId}/queue`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    pendingQueueCount = result.queue_position || 0;
+                    updateSendButton();
+                    // 更新排队状态显示
+                    const statusEl = messageDiv.querySelector('.queue-status');
+                    if (statusEl) {
+                        const label = statusEl.querySelector('.queue-label');
+                        if (label) {
+                            label.textContent = `队列中 (#${result.queue_position || '?'})`;
+                        }
+                    }
+                } else {
+                    // 队列失败
+                    pendingQueueCount = Math.max(0, pendingQueueCount - 1);
+                    updateSendButton();
+                    messageDiv.className = 'message user';
+                    const statusEl = messageDiv.querySelector('.queue-status');
+                    if (statusEl) {
+                        statusEl.innerHTML = '<span style="color:#ff6b6b">排队失败</span>';
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to queue message:', error);
+                pendingQueueCount = Math.max(0, pendingQueueCount - 1);
+                updateSendButton();
+                messageDiv.className = 'message user';
+                const statusEl = messageDiv.querySelector('.queue-status');
+                if (statusEl) {
+                    statusEl.innerHTML = '<span style="color:#ff6b6b">排队失败</span>';
+                }
             }
         }
 
@@ -2312,18 +2538,40 @@
 
         function updateSendButton() {
             if (isStreaming) {
-                elements.sendBtn.textContent = '停止';
-                elements.sendBtn.className = 'stop-btn';
+                const hasText = elements.inputBox.value.trim().length > 0;
+                if (hasText) {
+                    let badgeHtml = '';
+                    if (pendingQueueCount > 0) {
+                        badgeHtml = `<span class="queue-badge">${pendingQueueCount}</span>`;
+                    }
+                    elements.sendBtn.innerHTML = `${badgeHtml}`;
+                    elements.sendBtn.className = 'queue-btn';
+                    elements.sendBtn.title = '智能体正在运行中，点击将消息加入队列';
+                } else {
+                    let badgeHtml = '';
+                    if (pendingQueueCount > 0) {
+                        badgeHtml = `<span class="queue-badge">${pendingQueueCount}</span>`;
+                    }
+                    elements.sendBtn.innerHTML = `■ 停止${badgeHtml}`;
+                    elements.sendBtn.className = 'stop-btn';
+                    elements.sendBtn.title = '停止当前运行';
+                }
             } else {
-                elements.sendBtn.textContent = '发送';
+                elements.sendBtn.innerHTML = '发送';
                 elements.sendBtn.className = 'send-btn';
+                elements.sendBtn.title = '';
             }
             syncModelSelect();
         }
 
         function handleSendButtonClick() {
             if (isStreaming) {
-                stopChat();
+                const hasText = elements.inputBox.value.trim().length > 0;
+                if (hasText) {
+                    queueMessage();
+                } else {
+                    stopChat();
+                }
             } else {
                 sendMessage();
             }
@@ -2359,11 +2607,23 @@
         elements.sendBtn.addEventListener('click', handleSendButtonClick);
         elements.modelSelect.addEventListener('change', (event) => updateSessionModel(event.target.value));
         elements.messagesContainer.addEventListener('scroll', updateAutoScrollState);
-        elements.inputBox.addEventListener('input', autoResizeTextarea);
+        elements.inputBox.addEventListener('input', () => {
+            autoResizeTextarea();
+            if (isStreaming) updateSendButton();
+        });
         elements.inputBox.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                sendMessage();
+                if (isStreaming) {
+                    const hasText = elements.inputBox.value.trim().length > 0;
+                    if (hasText) {
+                        queueMessage();
+                    } else {
+                        stopChat();
+                    }
+                } else {
+                    sendMessage();
+                }
             }
         });
 

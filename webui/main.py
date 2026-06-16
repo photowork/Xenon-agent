@@ -445,6 +445,12 @@ async def event_generator(session_id: str, user_input: str, stream_id: Optional[
             elif event.type == 'final_content':
                 yield f"data: {json.dumps({'type': 'final_content', 'content': event.content}, ensure_ascii=False)}\n\n"
 
+            elif event.type == 'user_queued':
+                yield f"data: {json.dumps({'type': 'user_queued', 'content': event.content, 'queue_position': event.queue_position}, ensure_ascii=False)}\n\n"
+
+            elif event.type == 'queue_processing':
+                yield f"data: {json.dumps({'type': 'queue_processing', 'content': event.content, 'queue_remaining': event.queue_remaining}, ensure_ascii=False)}\n\n"
+
             elif event.type == 'tool_call':
                 yield f"data: {json.dumps({'type': 'tool_call', 'tool_name': event.tool_name, 'arguments': event.arguments, 'tool_call_id': event.tool_call_id}, ensure_ascii=False)}\n\n"
 
@@ -961,6 +967,42 @@ async def chat(session_id: str, request: ChatRequest, background_tasks: Backgrou
         raise
     except Exception as e:
         logger.error(f"Error in chat for session {session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat/{session_id}/queue")
+async def queue_chat_message(session_id: str, request: ChatRequest):
+    """在活跃流期间将消息排入 agent 内部队列，当前轮次完成后自动处理。"""
+    try:
+        require_session_id(session_id)
+        session = db.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        if not has_active_session_stream(session_id):
+            raise HTTPException(
+                status_code=409,
+                detail="No active stream for this session. Use POST /chat/{session_id} instead.",
+            )
+
+        agent = agent_instances.get(session_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found for this session")
+
+        if hasattr(agent, 'queue_message'):
+            result = agent.queue_message(request.message)
+        else:
+            raise HTTPException(status_code=500, detail="Agent does not support message queueing")
+
+        return {
+            "status": "queued",
+            "queue_position": result.get("pending_count", 0),
+            "dropped": result.get("dropped_count", 0) > 0,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error queueing message for session {session_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
