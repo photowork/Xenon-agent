@@ -7,6 +7,8 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
     <style>
         * {
             margin: 0;
@@ -1176,6 +1178,92 @@
             content: "▼ ";
         }
 
+        /* ── Tool call group: big foldable package ── */
+        .tool-group {
+            margin: 8px 0;
+            border: 1px solid rgba(205, 232, 229, 0.22);
+            border-radius: 8px;
+            overflow: hidden;
+            background: rgba(18, 56, 47, 0.1);
+        }
+
+        .tool-group > summary {
+            cursor: pointer;
+            padding: 8px 14px;
+            background: rgba(18, 56, 47, 0.28);
+            color: var(--x-aqua-bright);
+            font-size: 0.85rem;
+            font-weight: 700;
+            user-select: none;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .tool-group > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .tool-group > summary::before {
+            content: "▶ ";
+            font-size: 0.7rem;
+            margin-right: 5px;
+            transition: transform 0.2s;
+            display: inline-block;
+        }
+
+        .tool-group[open] > summary::before {
+            content: "▼ ";
+        }
+
+        .tool-group-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            flex: 1;
+        }
+
+        .tool-group-count {
+            background: var(--x-moss-deep);
+            color: var(--x-lime);
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-size: 0.78rem;
+            font-weight: 700;
+        }
+
+        .tool-group-state {
+            font-size: 0.82rem;
+            font-weight: 500;
+        }
+
+        .tool-group-state.running {
+            color: var(--x-aqua-bright);
+            animation: tool-pulse 1.5s ease-in-out infinite;
+        }
+
+        .tool-group-state.done {
+            color: var(--x-lime);
+        }
+
+        .tool-group-state.error {
+            color: var(--x-danger);
+        }
+
+        @keyframes tool-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .tool-group-body {
+            padding: 2px 8px 6px;
+        }
+
+        .tool-group .msg-details {
+            margin: 3px 0;
+        }
+
         .input-container {
             padding: 0 clamp(14px, 3vw, 36px) 18px;
             padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px));
@@ -1613,6 +1701,40 @@
                 return code;
             }
         });
+
+        // KaTeX 数学公式扩展 — 让 marked 渲染 $$...$$ 和 $...$
+        const renderMath = (tex, displayMode) => {
+            try {
+                return katex.renderToString(tex, { displayMode, throwOnError: false, strict: false });
+            } catch (e) {
+                return `<span class="katex-error">${escapeHtml(tex)}</span>`;
+            }
+        };
+        marked.use({
+            extensions: [{
+                name: 'mathBlock',
+                level: 'block',
+                start(src) { return src.match(/\$\$/)?.index; },
+                tokenizer(src) {
+                    const match = src.match(/^\$\$\n?([\s\S]*?)\n?\$\$/);
+                    if (match) {
+                        return { type: 'mathBlock', raw: match[0], text: match[1].trim(), displayMode: true };
+                    }
+                },
+                renderer(token) { return renderMath(token.text, token.displayMode); }
+            }, {
+                name: 'mathInline',
+                level: 'inline',
+                start(src) { return src.match(/\$/)?.index; },
+                tokenizer(src) {
+                    const match = src.match(/^\$([^$\n]+?)\$/);
+                    if (match) {
+                        return { type: 'mathInline', raw: match[0], text: match[1], displayMode: false };
+                    }
+                },
+                renderer(token) { return renderMath(token.text, token.displayMode); }
+            }]
+        });
         const API_BASE = '';
         
         let currentSessionId = null;
@@ -1787,6 +1909,10 @@
                 const limit = data.context_limit || 900000;
                 const percent = data.percent || 0;
                 const level = data.level || 'low';
+                const cleanupTriggerTokens = data.cleanup_trigger_tokens || Math.round(limit * 0.8);
+                const cleanupTriggerRatio = data.cleanup_trigger_ratio || 0.8;
+                const lastRequestEstimatedTokens = data.last_request_estimated_tokens;
+                const lastApiTotalTokens = data.last_api_total_tokens;
 
                 const el = elements.contextUsage;
                 const label = elements.contextUsageLabel;
@@ -1797,6 +1923,14 @@
 
                 if (el) {
                     el.className = `context-usage level-${level}`;
+                    let title = `当前上下文: ${tokens.toLocaleString()} / ${limit.toLocaleString()} (${percent}%)\n自动压缩阈值: ${cleanupTriggerTokens.toLocaleString()} (${Math.round(cleanupTriggerRatio * 100)}%)\n状态: ${level}`;
+                    queueMicrotask(() => { el.title = title; });
+                    if (lastRequestEstimatedTokens) {
+                        title += `\n上一轮请求估算: ${lastRequestEstimatedTokens.toLocaleString()}`;
+                    }
+                    if (lastApiTotalTokens) {
+                        title += `\n上一轮 API 总用量: ${lastApiTotalTokens.toLocaleString()}`;
+                    }
                     el.title = `Token 用量: ${tokens.toLocaleString()} / ${limit.toLocaleString()} (${percent}%) - 状态: ${level}`;
                 }
             } catch (error) {
@@ -1978,6 +2112,30 @@
             shouldAutoScrollMessages = isMessagesNearBottom();
         }
 
+        function groupToolMessages(messages) {
+            const result = [];
+            let toolGroup = null;
+
+            for (const msg of messages) {
+                if (msg.type === 'thinking' || msg.type === 'tool_call' || msg.type === 'tool_result') {
+                    if (!toolGroup) {
+                        toolGroup = {
+                            type: 'tool_group',
+                            role: 'assistant',
+                            items: []
+                        };
+                        result.push(toolGroup);
+                    }
+                    toolGroup.items.push(msg);
+                } else {
+                    toolGroup = null;
+                    result.push(msg);
+                }
+            }
+
+            return result;
+        }
+
         async function loadMessages(options = {}) {
             const { forceScroll = true } = options;
             if (!currentSessionId) return;
@@ -2015,7 +2173,8 @@
 
             elements.messagesContainer.innerHTML = '';
             
-            messages.forEach(msg => {
+            const grouped = groupToolMessages(messages);
+            grouped.forEach(msg => {
                 appendMessage(msg);
             });
 
@@ -2033,6 +2192,33 @@
             if (msg.type === 'thinking') {
                 messageDiv.className = 'message assistant';
                 messageDiv.innerHTML = `<details class="msg-details"><summary>🧠 思考</summary><div class="thinking">${escapeHtml(msg.content || '')}</div></details>`;
+            } else if (msg.type === 'tool_group') {
+                messageDiv.className = 'message assistant';
+                const items = msg.items || [];
+                const thinkingCount = items.filter(i => i.type === 'thinking').length;
+                const callCount = items.filter(i => i.type === 'tool_call').length;
+                const hasError = items.some(i => i.type === 'tool_result' && i.content && /error|失败|异常/i.test(i.content));
+                const stateClass = hasError ? 'error' : 'done';
+                let bodyHtml = '';
+                for (const item of items) {
+                    if (item.type === 'thinking') {
+                        bodyHtml += `<details class="msg-details"><summary>🧠 思考</summary><div class="thinking">${escapeHtml(item.content || '')}</div></details>`;
+                    } else if (item.type === 'tool_call') {
+                        bodyHtml += `<details class="msg-details"><summary>🔧 工具调用</summary><div class="tool-call">${escapeHtml(item.content || '')}</div></details>`;
+                    } else if (item.type === 'tool_result') {
+                        bodyHtml += `<details class="msg-details"><summary>📋 结果</summary><div class="tool-result">${escapeHtml(item.content || '')}</div></details>`;
+                    }
+                }
+                let summaryParts = [];
+                if (thinkingCount > 0) summaryParts.push(`🧠 <span class="tool-group-count">${thinkingCount}次思考</span>`);
+                if (callCount > 0) summaryParts.push(`🔧 <span class="tool-group-count">${callCount}次调用</span>`);
+                const summaryText = summaryParts.length > 0 ? summaryParts.join(' · ') : '空';
+                messageDiv.innerHTML = `<details class="tool-group"><summary>
+                    <span class="tool-group-status">
+                        ${summaryText}
+                        <span class="tool-group-state ${stateClass}">${hasError ? '⚠️ 有错误' : '✅ 已完成'}</span>
+                    </span>
+                </summary><div class="tool-group-body">${bodyHtml}</div></details>`;
             } else if (msg.type === 'tool_call') {
                 messageDiv.className = 'message assistant';
                 messageDiv.innerHTML = `<details class="msg-details"><summary>🔧 工具调用</summary><div class="tool-call">${escapeHtml(msg.content || '')}</div></details>`;
@@ -2089,7 +2275,11 @@
 
             let currentThinkingEl = null;
             let currentContentEl = null;
-            let currentToolProgressEl = null;
+            let currentToolGroupEl = null;
+            let thinkingCount = 0;
+            let toolGroupCallCount = 0;
+            let toolGroupHasError = false;
+            let streamContentBuffer = '';
             const sessionIdForRequest = currentSessionId;
             const modelForRequest = currentModel;
             const abortController = new AbortController();
@@ -2121,35 +2311,63 @@
                 }
             };
 
-            const ensureToolProgressElement = () => {
-                if (!currentToolProgressEl) {
+            const ensureToolGroupElement = () => {
+                if (!currentToolGroupEl) {
                     const messageDiv = document.createElement('div');
                     messageDiv.className = 'message assistant';
-                    messageDiv.innerHTML = `<details class="msg-details" open><summary>工具状态</summary><div class="tool-progress"></div></details>`;
+                    messageDiv.innerHTML = `<details class="tool-group" open><summary>
+                        <span class="tool-group-status">
+                            <span class="tool-group-state running">⏳ 执行中...</span>
+                        </span>
+                    </summary><div class="tool-group-body"></div></details>`;
                     elements.messagesContainer.appendChild(messageDiv);
-                    currentToolProgressEl = messageDiv.querySelector('.tool-progress');
+                    currentToolGroupEl = messageDiv.querySelector('.tool-group');
+                    thinkingCount = 0;
+                    toolGroupCallCount = 0;
+                    toolGroupHasError = false;
                 }
-                return currentToolProgressEl;
+                return currentToolGroupEl;
             };
 
-            const updateToolProgress = (content) => {
-                const progressEl = ensureToolProgressElement();
-                progressEl.textContent = content || '正在处理工具调用...';
+            const addToToolGroup = (html) => {
+                const group = ensureToolGroupElement();
+                const body = group.querySelector('.tool-group-body');
+                const temp = document.createElement('div');
+                temp.innerHTML = html;
+                body.appendChild(temp.firstElementChild);
             };
 
-            const finishToolProgress = (summaryText = '工具状态') => {
-                if (!currentToolProgressEl) {
-                    return;
+            const updateToolGroupStatus = (statusText, stateClass = 'running') => {
+                if (!currentToolGroupEl) return;
+                const summary = currentToolGroupEl.querySelector('summary');
+                if (!summary) return;
+                const statusEl = summary.querySelector('.tool-group-status');
+                if (!statusEl) return;
+                let parts = [];
+                if (thinkingCount > 0) parts.push(`🧠 <span class="tool-group-count">${thinkingCount}次思考</span>`);
+                if (toolGroupCallCount > 0) parts.push(`🔧 <span class="tool-group-count">${toolGroupCallCount}次调用</span>`);
+                const countHtml = parts.join(' · ');
+                statusEl.innerHTML = countHtml + ' <span class="tool-group-state ' + stateClass + '">' + statusText + '</span>';
+            };
+
+            const finalizeToolGroup = () => {
+                if (!currentToolGroupEl) return;
+                collapseThinking();
+                currentToolGroupEl.open = false;
+                const statusEl = currentToolGroupEl.querySelector('.tool-group-status');
+                if (statusEl) {
+                    let parts = [];
+                    if (thinkingCount > 0) parts.push(`🧠 <span class="tool-group-count">${thinkingCount}次思考</span>`);
+                    if (toolGroupCallCount > 0) parts.push(`🔧 <span class="tool-group-count">${toolGroupCallCount}次调用</span>`);
+                    const countHtml = parts.join(' · ');
+                    const stateText = toolGroupHasError ? '⚠️ 有错误' : '✅ 已完成';
+                    const stateClass = toolGroupHasError ? 'error' : 'done';
+                    statusEl.innerHTML = countHtml + ' <span class="tool-group-state ' + stateClass + '">' + stateText + '</span>';
                 }
-                const details = currentToolProgressEl.closest('details');
-                if (details) {
-                    details.open = false;
-                    const summary = details.querySelector('summary');
-                    if (summary) {
-                        summary.textContent = summaryText;
-                    }
-                }
-                currentToolProgressEl = null;
+                currentToolGroupEl = null;
+                thinkingCount = 0;
+                toolGroupCallCount = 0;
+                toolGroupHasError = false;
             };
 
             const finishStream = async () => {
@@ -2173,7 +2391,11 @@
                 }
                 currentThinkingEl = null;
                 currentContentEl = null;
-                currentToolProgressEl = null;
+                currentToolGroupEl = null;
+                thinkingCount = 0;
+                toolGroupCallCount = 0;
+                toolGroupHasError = false;
+                streamContentBuffer = '';
                 pendingQueueCount = 0;
                 updateSendButton();
                 const indicator = document.getElementById('typing-indicator');
@@ -2252,55 +2474,63 @@
                                 const data = JSON.parse(dataStr);
                                 
                                 if (data.type === 'thinking') {
+                                    currentContentEl = null;
+                                    ensureToolGroupElement();
                                     if (!currentThinkingEl) {
-                                        const messageDiv = document.createElement('div');
-                                        messageDiv.className = 'message assistant';
-                                        messageDiv.innerHTML = `<details class="msg-details" open><summary>🧠 思考中...</summary><div class="thinking"></div></details>`;
-                                        elements.messagesContainer.appendChild(messageDiv);
-                                        currentThinkingEl = messageDiv.querySelector('.thinking');
+                                        thinkingCount++;
+                                        const thinkingHtml = `<details class="msg-details" open><summary>🧠 思考中...</summary><div class="thinking"></div></details>`;
+                                        const group = currentToolGroupEl;
+                                        const body = group.querySelector('.tool-group-body');
+                                        const temp = document.createElement('div');
+                                        temp.innerHTML = thinkingHtml;
+                                        const detailsEl = temp.firstElementChild;
+                                        body.appendChild(detailsEl);
+                                        currentThinkingEl = detailsEl.querySelector('.thinking');
+                                        updateToolGroupStatus('⏳ 思考中...');
                                     }
                                     currentThinkingEl.textContent += data.content;
                                     scrollToBottom();
                                 } else if (data.type === 'tool_progress') {
                                     collapseThinking();
                                     currentContentEl = null;
-                                    updateToolProgress(data.content);
+                                    ensureToolGroupElement();
+                                    updateToolGroupStatus(data.content || '⏳ 处理中...');
                                     scrollToBottom();
                                 } else if (data.type === 'content') {
                                     collapseThinking();
-                                    finishToolProgress();
-                                    if (data.content === '\n') {
-                                        ensureAssistantContentElement();
-                                        currentContentEl.textContent += '\n';
-                                    } else {
-                                        ensureAssistantContentElement();
-                                        currentContentEl.textContent += data.content;
+                                    finalizeToolGroup();
+                                    ensureAssistantContentElement();
+                                    streamContentBuffer += data.content;
+                                    // 流式实时渲染 markdown + KaTeX 数学公式
+                                    try {
+                                        currentContentEl.innerHTML = marked.parse(streamContentBuffer);
+                                    } catch (e) {
+                                        currentContentEl.textContent = streamContentBuffer;
                                     }
                                     scrollToBottom();
                                 } else if (data.type === 'tool_call') {
                                     collapseThinking();
                                     currentContentEl = null;
-                                    const messageDiv = document.createElement('div');
-                                    messageDiv.className = 'message assistant';
                                     const toolName = data.tool_name || '';
                                     const args = data.arguments || '';
+                                    toolGroupCallCount++;
+                                    addToToolGroup(`<details class="msg-details" open><summary>🔧 工具调用</summary><div class="tool-call">${escapeHtml(toolName)}(${escapeHtml(args)})</div></details>`);
                                     if (toolName) {
-                                        updateToolProgress(`工具调用已准备，等待执行: ${toolName}`);
+                                        updateToolGroupStatus(`⏳ ${toolName} 执行中...`);
                                     }
-                                    messageDiv.innerHTML = `<details class="msg-details"><summary>🔧 工具调用</summary><div class="tool-call">${escapeHtml(toolName)}(${escapeHtml(args)})</div></details>`;
-                                    elements.messagesContainer.appendChild(messageDiv);
                                     scrollToBottom();
                                 } else if (data.type === 'tool_result') {
                                     currentThinkingEl = null;
                                     currentContentEl = null;
-                                    finishToolProgress('工具已完成');
-                                    const messageDiv = document.createElement('div');
-                                    messageDiv.className = 'message assistant';
-                                    messageDiv.innerHTML = `<details class="msg-details"><summary>📋 结果</summary><div class="tool-result">${escapeHtml(data.content || '')}</div></details>`;
-                                    elements.messagesContainer.appendChild(messageDiv);
+                                    const resultText = data.content || '';
+                                    if (/error|失败|异常|traceback|exception/i.test(resultText)) {
+                                        toolGroupHasError = true;
+                                    }
+                                    addToToolGroup(`<details class="msg-details"><summary>📋 结果</summary><div class="tool-result">${escapeHtml(resultText)}</div></details>`);
                                     scrollToBottom();
                                 } else if (data.type === 'error') {
-                                    finishToolProgress('工具已停止');
+                                    toolGroupHasError = true;
+                                    finalizeToolGroup();
                                     appendMessage({
                                         role: 'assistant',
                                         type: 'error',
@@ -2341,8 +2571,7 @@
                                     }
                                     scrollToBottom();
                                 } else if (data.type === 'done') {
-                                    collapseThinking();
-                                    finishToolProgress();
+                                    finalizeToolGroup();
                                     pendingQueueCount = 0;
                                     // 移除所有排队状态
                                     const queuedMessages = elements.messagesContainer.querySelectorAll('.queued-message');
@@ -2372,7 +2601,7 @@
                     try {
                         const data = JSON.parse(buffer.slice(6).trim());
                         if (data.type === 'done') {
-                            collapseThinking();
+                            finalizeToolGroup();
                             await finishStream();
                             return;
                         }

@@ -33,3 +33,8 @@ moviepy>=1.0.0
 mammoth>=1.4.0
 psutil>=5.9.0
 pywin32>=300          # Windows only: required for COM operations
+
+# OCR 工具依赖（需 Python 3.8-3.12，GPU 环境）
+# 当前 Python 3.13 
+# paddlepaddle-gpu==2.6.2
+# paddleocr>=3.7.0

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import html
 import os
 import re
 import secrets
@@ -27,14 +28,24 @@ SUPPORTED_ACTIONS = {
     "arc",
     "polyline",
     "rectangle",
+    "bspline",
+    "bezier",
     "create_sketch",
     "create_body",
+    "create_datum_plane",
+    "create_datum_axis",
+    "create_datum_point",
     "pad",
     "pocket",
     "partdesign_linear_pattern",
     "partdesign_polar_pattern",
     "partdesign_mirror",
     "partdesign_thickness",
+    "hole",
+    "partdesign_pipe",
+    "groove",
+    "loft",
+    "sweep",
     "set_properties",
     "fuse",
     "cut",
@@ -57,6 +68,13 @@ SUPPORTED_ACTIONS = {
     "techdraw_page",
     "techdraw_view",
     "techdraw_dimension",
+    "techdraw_section_view",
+    "techdraw_annotation",
+    "techdraw_balloon",
+    "shape_string",
+    "draft_array",
+    "draft_clone",
+    "import_dxf",
     "remove",
 }
 ID_REQUIRED_ACTIONS = SUPPORTED_ACTIONS - {"remove", "set_properties"}
@@ -187,11 +205,42 @@ ACTION_CONTRACTS.update(
         "arc": {"required": ["id", "start", "mid", "end"], "optional": []},
         "polyline": {"required": ["id", "points"], "optional": ["closed", "face"]},
         "rectangle": {"required": ["id", "width", "height"], "optional": ["x", "y", "z", "face"]},
+        "bspline": {
+            "required": ["id", "poles"],
+            "optional": ["degree", "closed", "knots", "weights", "face"],
+            "notes": "poles is a list of 3D control points. degree defaults to 3. knots/weights optional for advanced control.",
+            "example": {"op": "bspline", "id": "curve", "poles": [[0,0,0],[20,0,10],[40,10,10],[60,10,0]], "degree": 3},
+        },
+        "bezier": {
+            "required": ["id", "poles"],
+            "optional": ["degree", "face"],
+            "notes": "poles is a list of 3D control points. degree defaults to len(poles)-1 (Bezier curve passes through first and last pole).",
+            "example": {"op": "bezier", "id": "arch", "poles": [[0,0,0],[10,20,0],[20,0,0]]},
+        },
         "create_sketch": {
             "required": ["id", "geometry"],
-            "optional": ["constraints", "body", "support", "placement"],
+            "optional": ["constraints", "body", "support", "placement", "offset"],
+            "notes": "support can be xy/xz/yz or a datum plane object ID. offset is a 3-vector in global coordinates; for named planes (xz/yz) it is automatically transformed to the attachment local CS.",
         },
         "create_body": {"required": ["id"], "optional": []},
+        "create_datum_plane": {
+            "required": ["id"],
+            "optional": ["body", "attachment", "placement", "offset"],
+            "notes": "Creates a PartDesign::Plane datum. attachment can be xy/xz/yz or an object reference dict. Use for sketch support or feature reference.",
+            "example": {"op": "create_datum_plane", "id": "top_face", "body": "body", "attachment": "xy", "offset": [0,0,10]},
+        },
+        "create_datum_axis": {
+            "required": ["id"],
+            "optional": ["body", "attachment", "placement", "base", "direction"],
+            "notes": "Creates a PartDesign::Line datum. attachment can be x/y/z or an object reference dict.",
+            "example": {"op": "create_datum_axis", "id": "center_axis", "body": "body", "attachment": "z"},
+        },
+        "create_datum_point": {
+            "required": ["id"],
+            "optional": ["body", "attachment", "placement", "position"],
+            "notes": "Creates a PartDesign::Point datum. position is a 3-vector.",
+            "example": {"op": "create_datum_point", "id": "origin", "body": "body", "position": [0,0,0]},
+        },
         "pad": {
             "required": ["id", "body", "profile", "length"],
             "optional": ["reversed", "midplane", "type", "length2"],
@@ -241,12 +290,43 @@ ACTION_CONTRACTS.update(
             "required": ["id", "body", "source", "faces", "thickness"],
             "optional": ["reversed", "mode", "join"],
         },
+        "groove": {
+            "required": ["id", "body", "profile"],
+            "optional": ["axis", "base", "angle", "reversed", "midplane", "type"],
+            "notes": "PartDesign Groove: revolves the profile and subtracts it from the body. axis is x/y/z or an object reference dict.",
+            "example": {"op": "groove", "id": "slot", "body": "body", "profile": "slot_sketch", "axis": "z", "angle": 360},
+        },
+        "partdesign_pipe": {
+            "required": ["id", "body", "path"],
+            "optional": ["profile", "profiles", "transition", "keep_source"],
+            "notes": "PartDesign Pipe: parametric sweep along a path. transition: transformed/linear/frenet. profile is single object; profiles is a list.",
+            "example": {"op": "partdesign_pipe", "id": "wire_pipe", "body": "body", "path": "spine", "profile": "cross_section", "transition": "frenet"},
+        },
+        "hole": {
+            "required": ["id", "body", "profile"],
+            "optional": ["hole_type", "thread_type", "diameter", "depth", "thread_depth", "drill_point", "reversed", "tapered", "model_thread"],
+            "notes": "PartDesign Hole: creates standard holes. hole_type: through/blind/counterbore/countersink. thread_type: none/metric/metric_fine. diameter is the hole diameter (mm).",
+            "example": {"op": "hole", "id": "m8_hole", "body": "body", "profile": "hole_sketch", "hole_type": "through", "diameter": 8},
+        },
+        "loft": {
+            "required": ["id", "profiles"],
+            "optional": ["ruled", "closed", "keep_profiles"],
+            "notes": "Lofts through 2 or more profile wires/sketches. profiles is a list of object names.",
+            "example": {"op": "loft", "id": "transition", "profiles": ["circle1", "circle2", "circle3"], "ruled": True},
+        },
+        "sweep": {
+            "required": ["id", "path", "profiles"],
+            "optional": ["make_solid", "frenet", "keep_source"],
+            "notes": "Sweeps one or more profiles along a path wire. path is a single object name, profiles is a list.",
+            "example": {"op": "sweep", "id": "tube", "path": "spine", "profiles": ["cross_section"], "make_solid": True},
+        },
         "create_assembly": {"required": ["id"], "optional": ["create_joint_group"]},
         "assembly_link": {"required": ["id", "assembly", "source"], "optional": ["placement"]},
         "techdraw_page": {"required": ["id"], "optional": ["template_path", "scale"]},
         "techdraw_view": {
             "required": ["id", "page"],
             "optional": ["source", "sources", "direction", "x", "y", "scale", "rotation"],
+            "notes": "direction accepts a 3-vector [x,y,z] or a string: top/bottom/front/rear/left/right/x/y/z.",
         },
         "techdraw_dimension": {
             "required": ["id", "page", "view"],
@@ -260,8 +340,51 @@ ACTION_CONTRACTS.update(
                 "over_tolerance",
                 "under_tolerance",
             ],
+            "notes": "dimension_type: Distance/DistanceX/DistanceY/Radius/Diameter/Angle/Angle3Pt. measure_type: Projected/True.",
+        },
+        "techdraw_section_view": {
+            "required": ["id", "page", "source"],
+            "optional": ["section_direction", "section_normal", "section_origin", "scale", "x", "y", "label"],
+            "notes": "Creates a TechDraw section view. section_direction is the cutting plane normal (3-vector or x/y/z). section_origin is a 3-vector point on the cutting plane.",
+            "example": {"op": "techdraw_section_view", "id": "section_a", "page": "page1", "source": "part", "section_direction": "z", "section_origin": [0, 0, 5]},
+        },
+        "techdraw_annotation": {
+            "required": ["id", "page", "text"],
+            "optional": ["x", "y", "font_size"],
+            "notes": "Adds a text annotation to a TechDraw page.",
+            "example": {"op": "techdraw_annotation", "id": "note1", "page": "page1", "text": "All dimensions in mm", "x": 50, "y": 200},
+        },
+        "techdraw_balloon": {
+            "required": ["id", "page", "view", "text"],
+            "optional": ["x", "y", "origin_x", "origin_y", "font_size"],
+            "notes": "Adds a balloon (callout) to a TechDraw view for part numbering.",
+            "example": {"op": "techdraw_balloon", "id": "balloon1", "page": "page1", "view": "view1", "text": "1", "origin_x": 100, "origin_y": 100, "x": 150, "y": 50},
         },
         "remove": {"required": ["object"], "optional": []},
+        "shape_string": {
+            "required": ["id", "string", "font_path"],
+            "optional": ["size", "tracking", "extrude", "position", "placement"],
+            "notes": "Creates 3D text (Draft ShapeString). string is the text content. font_path is a .ttf/.otf file path. size is font height in mm.",
+            "example": {"op": "shape_string", "id": "label", "string": "Xenon", "font_path": "C:/Windows/Fonts/arial.ttf", "size": 10, "extrude": 2},
+        },
+        "draft_array": {
+            "required": ["id", "source"],
+            "optional": ["array_type", "count_x", "count_y", "count_z", "interval_x", "interval_y", "interval_z", "axis", "angle", "count", "fused"],
+            "notes": "Draft Array: array_type is orthogonal/polar/circular. For orthogonal use count_x/y/z + interval_x/y/z. For polar use axis/angle/count.",
+            "example": {"op": "draft_array", "id": "grid", "source": "cell", "array_type": "orthogonal", "count_x": 3, "count_y": 3, "interval_x": [10,0,0], "interval_y": [0,10,0]},
+        },
+        "draft_clone": {
+            "required": ["id", "source"],
+            "optional": ["placement"],
+            "notes": "Creates a parametric clone of the source object.",
+            "example": {"op": "draft_clone", "id": "clone1", "source": "original"},
+        },
+        "import_dxf": {
+            "required": ["id", "file_path"],
+            "optional": ["as_sketch", "layer_filter"],
+            "notes": "Imports a DXF file as 2D geometry. as_sketch=true creates a Sketcher object; default creates Draft objects. layer_filter is an optional list of layer names to import.",
+            "example": {"op": "import_dxf", "id": "imported", "file_path": "input/drawing.dxf", "as_sketch": True},
+        },
     }
 )
 
@@ -276,6 +399,109 @@ def _failure(error: Exception | str, **data: Any) -> Dict[str, Any]:
     result: Dict[str, Any] = {"success": False, "error": str(error)}
     result.update(data)
     return result
+
+
+def _strip_markup_text(value: Any) -> str:
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _first_metadata_value(text: str, labels: List[str], pattern: str = r"([^\s,;，；]+)") -> str:
+    for label in labels:
+        match = re.search(rf"{re.escape(label)}\s*[:：]?\s*{pattern}", text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _extract_layout_metadata(text_blocks: List[Dict[str, Any]]) -> Dict[str, str]:
+    text = " ".join(block.get("text", "") for block in text_blocks)
+    metadata: Dict[str, str] = {}
+    candidates = {
+        "material": _first_metadata_value(text, ["材料", "material"]),
+        "unit": _first_metadata_value(text, ["单位", "unit"]),
+        "scale": _first_metadata_value(text, ["比例", "scale"], r"([0-9]+[:：][0-9]+|[0-9.]+)"),
+        "part_name": _first_metadata_value(text, ["零件名称", "part name"], r"([^\s,;，；]+)"),
+        "version": _first_metadata_value(text, ["版本号", "version"]),
+        "drawing_number": _first_metadata_value(text, ["图纸编号", "drawing number"], r"([^\s,;，；]+)"),
+    }
+    for key, value in candidates.items():
+        if value:
+            metadata[key] = value
+    drawing_size = re.search(r"\bA[0-4]\b", text)
+    if drawing_size:
+        metadata["drawing_size"] = drawing_size.group(0)
+    return metadata
+
+
+def _paddleocr_sidecar_candidates(source: Path) -> List[Path]:
+    candidates = [source.with_name(f"{source.name}_by_PaddleOCR-VL-1.6.json")]
+    candidates.extend(sorted(source.parent.glob(f"{source.name}_by_PaddleOCR*.json")))
+    unique: List[Path] = []
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate).lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def _load_paddleocr_layout(source: Path) -> Dict[str, Any]:
+    sidecar = next((candidate for candidate in _paddleocr_sidecar_candidates(source) if candidate.is_file()), None)
+    if sidecar is None:
+        return {
+            "source": "none",
+            "sidecar_path": "",
+            "view_regions": [],
+            "text_blocks": [],
+            "metadata": {},
+        }
+    try:
+        raw = json.loads(sidecar.read_text(encoding="utf-8"))
+        root = raw[0] if isinstance(raw, list) and raw else raw
+        pruned = root.get("prunedResult", root) if isinstance(root, dict) else {}
+        blocks = pruned.get("parsing_res_list", []) if isinstance(pruned, dict) else []
+        view_regions: List[Dict[str, Any]] = []
+        text_blocks: List[Dict[str, Any]] = []
+        for index, block in enumerate(blocks):
+            if not isinstance(block, dict):
+                continue
+            bbox = block.get("block_bbox") or block.get("bbox") or []
+            if len(bbox) != 4:
+                continue
+            x1, y1, x2, y2 = [int(round(float(value))) for value in bbox]
+            item = {
+                "block_id": block.get("block_id", index),
+                "label": str(block.get("block_label") or ""),
+                "bbox": [x1, y1, x2, y2],
+                "width": max(0, x2 - x1),
+                "height": max(0, y2 - y1),
+            }
+            if item["label"] == "image":
+                view_regions.append(item)
+            else:
+                text = _strip_markup_text(block.get("block_content", ""))
+                if text:
+                    text_blocks.append({**item, "text": text})
+        return {
+            "source": "paddleocr_vl_sidecar",
+            "sidecar_path": str(sidecar),
+            "view_regions": view_regions,
+            "text_blocks": text_blocks,
+            "metadata": _extract_layout_metadata(text_blocks),
+            "model_settings": pruned.get("model_settings", {}) if isinstance(pruned, dict) else {},
+        }
+    except Exception as exc:
+        return {
+            "source": "paddleocr_vl_sidecar_error",
+            "sidecar_path": str(sidecar),
+            "error": str(exc),
+            "view_regions": [],
+            "text_blocks": [],
+            "metadata": {},
+        }
 
 
 def _version_key(path: Path) -> Tuple[int, ...]:
@@ -530,6 +756,23 @@ class FreeCADAutomation:
                 raise ValueError(f"Action {index} (extrude) requires exactly one of vector or length")
             if op == "linear_array" and "step" in action and "vector" in action:
                 raise ValueError(f"Action {index} (linear_array) must use either step or vector, not both")
+            if op in {"bspline", "bezier"}:
+                poles = action.get("poles")
+                if not isinstance(poles, list) or len(poles) < 2:
+                    raise ValueError(f"Action {index} ({op}) requires a poles list with at least 2 control points")
+                for item in poles:
+                    if not isinstance(item, (list, tuple)) or len(item) != 3:
+                        raise ValueError(f"Action {index} ({op}) poles must each be a 3-number vector")
+                degree = int(action.get("degree", 3 if op == "bspline" else len(poles) - 1))
+                if degree < 1 or degree >= len(poles):
+                    raise ValueError(f"Action {index} ({op}) degree must be between 1 and len(poles)-1")
+            if op == "bspline":
+                knots = action.get("knots")
+                if knots is not None and (not isinstance(knots, list) or len(knots) < 2):
+                    raise ValueError(f"Action {index} (bspline) knots must be a list with at least 2 values")
+                weights = action.get("weights")
+                if weights is not None and (not isinstance(weights, list) or len(weights) != len(action["poles"])):
+                    raise ValueError(f"Action {index} (bspline) weights must match poles length")
             for vector_name in (
                 "position",
                 "center",
@@ -551,27 +794,29 @@ class FreeCADAutomation:
                 vector = action[vector_name]
                 if (
                     (op == "partdesign_linear_pattern" and vector_name == "direction")
-                    or (op == "partdesign_polar_pattern" and vector_name == "axis")
+                    or (op in {"partdesign_polar_pattern", "groove"} and vector_name == "axis")
+                    or (op == "techdraw_view" and vector_name == "direction")
+                    or (op == "techdraw_section_view" and vector_name == "section_direction")
                 ) and (
-                    str(vector).strip().lower() in {"x", "y", "z"} or isinstance(vector, dict)
+                    str(vector).strip().lower() in {"x", "y", "z", "top", "bottom", "front", "rear", "left", "right"} or isinstance(vector, dict)
                 ):
                     continue
                 if not isinstance(vector, (list, tuple)) or len(vector) != 3:
                     raise ValueError(
                         f"Action {index} ({op}) parameter '{vector_name}' must be a three-number vector"
                     )
-                    try:
-                        numeric_vector = [float(item) for item in vector]
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError(
-                            f"Action {index} ({op}) parameter '{vector_name}' must contain only numbers"
-                        ) from exc
-                    if vector_name in {"direction", "axis", "normal", "vector", "step"} and not any(
-                        abs(item) > 1e-12 for item in numeric_vector
-                    ):
-                        raise ValueError(
-                            f"Action {index} ({op}) parameter '{vector_name}' must not be a zero vector"
-                        )
+                try:
+                    numeric_vector = [float(item) for item in vector]
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Action {index} ({op}) parameter '{vector_name}' must contain only numbers"
+                    ) from exc
+                if vector_name in {"direction", "axis", "normal", "vector", "step"} and not any(
+                    abs(item) > 1e-12 for item in numeric_vector
+                ):
+                    raise ValueError(
+                        f"Action {index} ({op}) parameter '{vector_name}' must not be a zero vector"
+                    )
             if "visual_delay" in action:
                 visual_delay = float(action["visual_delay"])
                 if visual_delay < 0 or visual_delay > MAX_VISUAL_DELAY:
@@ -579,6 +824,69 @@ class FreeCADAutomation:
                         f"Action {index} visual_delay must be between 0 and {MAX_VISUAL_DELAY} seconds"
                     )
                 action["visual_delay"] = visual_delay
+            # --- placement format validation ---
+            if "placement" in action:
+                placement = action["placement"]
+                if not isinstance(placement, (dict, str)):
+                    raise ValueError(
+                        f"Action {index} ({op}) placement must be a dictionary "
+                        "(e.g. {'Base': [0,0,0], 'axis': [0,0,1], 'angle': 0}) "
+                        "or a plane shortcut string ('xy', 'xz', 'yz')"
+                    )
+                if isinstance(placement, str) and placement.strip().lower() not in {"xy", "xz", "yz"}:
+                    raise ValueError(
+                        f"Action {index} ({op}) placement string '{placement}' is not recognized. "
+                        "Use 'xy', 'xz', 'yz', or a placement dictionary."
+                    )
+            # --- create_sketch geometry type validation ---
+            if op == "create_sketch":
+                geometry = action.get("geometry", [])
+                if not isinstance(geometry, list):
+                    raise ValueError(f"Action {index} (create_sketch) geometry must be a list")
+                valid_geom_types = {"line", "circle", "arc", "rectangle", "polyline", "bspline", "bezier"}
+                for gi, geom in enumerate(geometry):
+                    if not isinstance(geom, dict):
+                        raise ValueError(
+                            f"Action {index} (create_sketch) geometry[{gi}] must be a dictionary"
+                        )
+                    geom_type = str(geom.get("type") or "").strip().lower()
+                    if geom_type not in valid_geom_types:
+                        raise ValueError(
+                            f"Action {index} (create_sketch) geometry[{gi}] has unsupported type '{geom_type}'. "
+                            f"Supported types: {', '.join(sorted(valid_geom_types))}"
+                        )
+            # --- techdraw_dimension enum validation ---
+            if op == "techdraw_dimension":
+                valid_dim_types = {"Distance", "DistanceX", "DistanceY", "Radius", "Diameter", "Angle", "Angle3Pt"}
+                valid_measure_types = {"Projected", "True"}
+                dim_type = str(action.get("dimension_type") or "Distance")
+                measure_type = str(action.get("measure_type") or "Projected")
+                if dim_type not in valid_dim_types:
+                    raise ValueError(
+                        f"Action {index} (techdraw_dimension) dimension_type '{dim_type}' is not valid. "
+                        f"Valid values: {', '.join(sorted(valid_dim_types))}"
+                    )
+                if measure_type not in valid_measure_types:
+                    raise ValueError(
+                        f"Action {index} (techdraw_dimension) measure_type '{measure_type}' is not valid. "
+                        f"Valid values: {', '.join(sorted(valid_measure_types))}"
+                    )
+            # --- techdraw_view direction validation ---
+            if op == "techdraw_view" and "direction" in action:
+                direction = action["direction"]
+                if isinstance(direction, str):
+                    valid_dirs = {"x", "y", "z", "top", "bottom", "front", "rear", "left", "right"}
+                    if direction.strip().lower() not in valid_dirs:
+                        raise ValueError(
+                            f"Action {index} (techdraw_view) direction string '{direction}' is not recognized. "
+                            f"Valid strings: {', '.join(sorted(valid_dirs))}. "
+                            f"Or use a 3-number vector like [0, 0, 1]."
+                        )
+                elif not isinstance(direction, (list, tuple)) or len(direction) != 3:
+                    raise ValueError(
+                        f"Action {index} (techdraw_view) direction must be a 3-number vector "
+                        f"or a direction string (top/bottom/front/rear/left/right/x/y/z)"
+                    )
             result.append(action)
         return result
 
@@ -619,7 +927,7 @@ class FreeCADAutomation:
             normalized.setdefault("base", "$selection1")
             if "tool" not in normalized and "tools" not in normalized:
                 normalized["tool"] = "$selection2"
-        if op in {"pad", "pocket"}:
+        if op in {"pad", "pocket", "groove", "hole"}:
             normalized.setdefault("body", "$active_body")
             normalized.setdefault("profile", "$selection")
         if op in {
@@ -630,6 +938,9 @@ class FreeCADAutomation:
             normalized.setdefault("body", "$active_body")
             if "original" not in normalized and "originals" not in normalized:
                 normalized["original"] = "$selection"
+        if op == "partdesign_pipe":
+            normalized.setdefault("body", "$active_body")
+            normalized.setdefault("path", "$selection")
         if op == "partdesign_thickness":
             normalized.setdefault("body", "$active_body")
             normalized.setdefault("source", "$selection")
@@ -984,8 +1295,10 @@ class FreeCADToolManager:
                     "live_redo",
                 ],
                 "selection_placeholders": sorted(COLLABORATION_SELECTION_TOKENS),
-                "part_design": ["create_body", "create_sketch", "pad", "pocket", "partdesign_linear_pattern", "partdesign_polar_pattern", "partdesign_mirror", "partdesign_thickness"],
-                "techdraw": ["techdraw_page", "techdraw_view", "techdraw_dimension"],
+                "part_design": ["create_body", "create_sketch", "pad", "pocket", "groove", "hole", "partdesign_pipe", "create_datum_plane", "create_datum_axis", "create_datum_point", "partdesign_linear_pattern", "partdesign_polar_pattern", "partdesign_mirror", "partdesign_thickness"],
+                "loft_sweep": ["loft", "sweep"],
+                "techdraw": ["techdraw_page", "techdraw_view", "techdraw_dimension", "techdraw_section_view", "techdraw_annotation", "techdraw_balloon"],
+                "draft": ["shape_string", "draft_array", "draft_clone", "import_dxf"],
                 "assembly": ["create_assembly", "assembly_link"],
                 "vision": ["analyze_drawing_image", "create_model_from_drawing", "compare_visuals", "evaluate_visual_iteration"],
             },
@@ -1681,10 +1994,11 @@ class FreeCADToolManager:
         allow_external_paths: bool = False,
     ) -> Dict[str, Any]:
         """
-        Detect OCR dimensions, lines, and circles in an engineering drawing image.
+        Analyze drawing layout and visual geometry in an engineering image.
 
-        The result is intended for an agent to turn into a reviewed modeling
-        scenario; ambiguous dimensions are reported instead of silently guessed.
+        OCR text is auxiliary metadata only. The result is intended for an agent
+        to turn visual evidence into a reviewed modeling scenario; dimensions are
+        candidates and are never treated as automatic modeling authority.
         """
         try:
             import cv2
@@ -1699,28 +2013,103 @@ class FreeCADToolManager:
             if image is None:
                 raise ValueError(f"OpenCV could not read image: {source}")
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(gray, 60, 180)
-            raw_lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80, minLineLength=30, maxLineGap=8)
-            raw_circles = cv2.HoughCircles(
-                gray,
-                cv2.HOUGH_GRADIENT,
-                dp=1.2,
-                minDist=20,
-                param1=100,
-                param2=30,
-                minRadius=3,
-                maxRadius=0,
-            )
+            page_height, page_width = gray.shape[:2]
+            layout = _load_paddleocr_layout(source)
+            view_regions = []
+            for region in layout.get("view_regions", []):
+                x1, y1, x2, y2 = region["bbox"]
+                x1 = max(0, min(page_width - 1, x1))
+                y1 = max(0, min(page_height - 1, y1))
+                x2 = max(x1 + 1, min(page_width, x2))
+                y2 = max(y1 + 1, min(page_height, y2))
+                view_regions.append({**region, "bbox": [x1, y1, x2, y2], "width": x2 - x1, "height": y2 - y1})
+
+            large_view_regions = [
+                region
+                for region in view_regions
+                if region.get("width", 0) >= 80 and region.get("height", 0) >= 80
+            ]
+            if large_view_regions:
+                detect_regions = large_view_regions
+                geometry_scope = "paddleocr_view_regions"
+            else:
+                detect_regions = [
+                    {
+                        "block_id": "full_page",
+                        "label": "full_page",
+                        "bbox": [0, 0, page_width, page_height],
+                        "width": page_width,
+                        "height": page_height,
+                    }
+                ]
+                geometry_scope = "full_page_fallback"
+
             lines = []
-            if raw_lines is not None:
-                for x1, y1, x2, y2 in raw_lines[:, 0][:500]:
-                    lines.append({"start": [int(x1), int(y1)], "end": [int(x2), int(y2)]})
-                    cv2.line(image, (x1, y1), (x2, y2), (0, 180, 0), 1)
             circles = []
-            if raw_circles is not None:
-                for x, y, radius in np.round(raw_circles[0, :100]).astype(int):
-                    circles.append({"center": [int(x), int(y)], "radius_pixels": int(radius)})
-                    cv2.circle(image, (x, y), radius, (255, 0, 255), 2)
+            geometry_regions = []
+            for region in detect_regions:
+                x1, y1, x2, y2 = region["bbox"]
+                crop_gray = gray[y1:y2, x1:x2]
+                if crop_gray.size == 0:
+                    continue
+                if region["label"] != "full_page":
+                    cv2.rectangle(image, (x1, y1), (x2, y2), (40, 120, 255), 2)
+                line_start = len(lines)
+                circle_start = len(circles)
+                min_length = max(20, min(region["width"], region["height"]) // 9)
+                threshold = 80 if min(region["width"], region["height"]) >= 160 else 40
+                edges = cv2.Canny(crop_gray, 60, 180)
+                raw_lines = cv2.HoughLinesP(
+                    edges,
+                    1,
+                    np.pi / 180,
+                    threshold=threshold,
+                    minLineLength=min_length,
+                    maxLineGap=8,
+                )
+                if raw_lines is not None:
+                    for lx1, ly1, lx2, ly2 in raw_lines[:, 0]:
+                        if len(lines) >= 500:
+                            break
+                        line = {
+                            "start": [int(lx1 + x1), int(ly1 + y1)],
+                            "end": [int(lx2 + x1), int(ly2 + y1)],
+                            "region_id": region.get("block_id"),
+                        }
+                        lines.append(line)
+                        cv2.line(image, tuple(line["start"]), tuple(line["end"]), (0, 180, 0), 1)
+                min_dim = min(region["width"], region["height"])
+                circle_min_distance = max(24, min_dim // 7)
+                circle_max_radius = max(8, min_dim // 5)
+                circle_gray = cv2.medianBlur(crop_gray, 3)
+                raw_circles = cv2.HoughCircles(
+                    circle_gray,
+                    cv2.HOUGH_GRADIENT,
+                    dp=1.2,
+                    minDist=circle_min_distance,
+                    param1=120,
+                    param2=50,
+                    minRadius=5,
+                    maxRadius=circle_max_radius,
+                )
+                if raw_circles is not None:
+                    for x, y, radius in np.round(raw_circles[0, :]).astype(int):
+                        if len(circles) >= 100:
+                            break
+                        circle = {
+                            "center": [int(x + x1), int(y + y1)],
+                            "radius_pixels": int(radius),
+                            "region_id": region.get("block_id"),
+                        }
+                        circles.append(circle)
+                        cv2.circle(image, tuple(circle["center"]), int(radius), (255, 0, 255), 2)
+                geometry_regions.append(
+                    {
+                        **region,
+                        "line_count": len(lines) - line_start,
+                        "circle_count": len(circles) - circle_start,
+                    }
+                )
             ocr_text = ""
             ocr_error = ""
             try:
@@ -1747,6 +2136,48 @@ class FreeCADToolManager:
                         "raw": match.group(0).strip(),
                     }
                 )
+
+            # Enhanced recognition: thread specs, angles, surface roughness
+            thread_specs = []
+            thread_pattern = re.compile(
+                r"(?P<thread_type>[MmGgNn])"
+                r"(?P<nominal>\d+(?:\.\d+)?)"
+                r"(?:\s*[xX×]\s*(?P<pitch>\d+(?:\.\d+)?))?"
+                r"(?:\s*[-–]\s*(?P<class>\d+[HhGg]))?"
+                r"|(?P<npt>NPT)\s*(?P<npt_size>1/2|3/4|1|1-1/4|1-1/2|2)"
+            )
+            for match in thread_pattern.finditer(ocr_text):
+                if match.group("npt"):
+                    thread_specs.append({
+                        "kind": "thread_npt",
+                        "spec": f"NPT {match.group('npt_size')}",
+                        "size": match.group("npt_size"),
+                        "raw": match.group(0).strip(),
+                    })
+                else:
+                    spec = f"M{match.group('nominal')}"
+                    if match.group("pitch"):
+                        spec += f"x{match.group('pitch')}"
+                    if match.group("class"):
+                        spec += f"-{match.group('class')}"
+                    thread_specs.append({
+                        "kind": "thread_metric",
+                        "spec": spec,
+                        "nominal_diameter": float(match.group("nominal")),
+                        "pitch": float(match.group("pitch")) if match.group("pitch") else None,
+                        "fit_class": match.group("class"),
+                        "raw": match.group(0).strip(),
+                    })
+
+            angles = []
+            angle_pattern = re.compile(r"(?P<value>\d+(?:\.\d+)?)\s*°")
+            for match in angle_pattern.finditer(ocr_text):
+                angles.append({"value": float(match.group("value")), "raw": match.group(0).strip()})
+
+            roughness = []
+            roughness_pattern = re.compile(r"Ra\s*(?P<value>\d+(?:\.\d+)?)", re.IGNORECASE)
+            for match in roughness_pattern.finditer(ocr_text):
+                roughness.append({"value": float(match.group("value")), "raw": match.group(0).strip()})
             output = ""
             if annotated_path:
                 output_path = self._automation.resolve_path(
@@ -1761,9 +2192,23 @@ class FreeCADToolManager:
                 "Engineering drawing analyzed",
                 image_path=str(source),
                 image_size={"width": int(gray.shape[1]), "height": int(gray.shape[0])},
+                layout_source=layout.get("source", "none"),
+                layout=layout,
+                view_regions=view_regions,
+                geometry_scope=geometry_scope,
+                geometry_regions=geometry_regions,
+                ocr_role="auxiliary_metadata_only",
+                modeling_guidance=(
+                    "Do not build geometry from OCR dimensions alone. Use visual/layout evidence, "
+                    "construct reviewed structured actions, then validate the FreeCAD result."
+                ),
                 ocr_text=ocr_text,
                 ocr_error=ocr_error,
                 dimensions=dimensions,
+                dimension_extraction_role="legacy_text_candidates_not_modeling_authority",
+                thread_specs=thread_specs,
+                angles=angles,
+                surface_roughness=roughness,
                 lines=lines,
                 circles=circles,
                 annotated_path=output,
@@ -1781,13 +2226,14 @@ class FreeCADToolManager:
         overwrite: bool = False,
         allow_external_paths: bool = False,
         timeout: int = 300,
+        allow_legacy_ocr_plate: bool = False,
     ) -> Dict[str, Any]:
         """
-        Reconstruct a conservative simple top-view plate model from a drawing image.
+        Analyze a drawing image and require reviewed structured modeling actions.
 
-        Automatic creation proceeds only when at least width and height dimensions
-        are recognized and thickness is supplied or recognized. Complex drawings
-        remain review-required and are not silently guessed.
+        OCR-led reconstruction is disabled by default because OCR dimensions are
+        auxiliary candidates, not visual authority. Set allow_legacy_ocr_plate to
+        true only for the old simple top-view plate experiment.
         """
         try:
             analysis = self.analyze_drawing_image(
@@ -1796,6 +2242,20 @@ class FreeCADToolManager:
             )
             if not analysis.get("success"):
                 return analysis
+            if not allow_legacy_ocr_plate:
+                return _failure(
+                    "Automatic OCR-led reconstruction is disabled; create reviewed structured actions from visual evidence instead.",
+                    analysis=analysis,
+                    review_required=True,
+                    model_created=False,
+                    ocr_role="auxiliary_metadata_only",
+                    recommended_workflow=[
+                        "analyze_drawing_image",
+                        "review view_regions, geometry, and metadata",
+                        "execute_scenario with explicit structured actions",
+                        "render_preview or inspect_document to validate the model",
+                    ],
+                )
             linear = sorted(
                 {float(item["value"]) for item in analysis.get("dimensions", []) if item.get("kind") == "linear"},
                 reverse=True,
@@ -1805,6 +2265,8 @@ class FreeCADToolManager:
                     "Automatic modeling requires at least two recognized linear dimensions",
                     analysis=analysis,
                     review_required=True,
+                    model_created=False,
+                    legacy_ocr_plate_mode=True,
                 )
             width, height = linear[0], linear[1]
             model_thickness = float(thickness or (linear[2] if len(linear) > 2 else 0))
@@ -1813,6 +2275,8 @@ class FreeCADToolManager:
                     "Automatic modeling requires a positive thickness argument or a third linear dimension",
                     analysis=analysis,
                     review_required=True,
+                    model_created=False,
+                    legacy_ocr_plate_mode=True,
                 )
             actions: List[Dict[str, Any]] = [
                 {"op": "box", "id": "plate", "length": width, "width": height, "height": model_thickness}
@@ -1863,6 +2327,11 @@ class FreeCADToolManager:
             result["analysis"] = analysis
             result["review_required"] = True
             result["reconstruction_scope"] = "simple_top_view_plate"
+            result["legacy_ocr_plate_mode"] = True
+            result["model_created"] = bool(result.get("success"))
+            result["warning"] = (
+                "Legacy OCR plate mode is an experimental fallback. Do not use it as the primary drawing-to-CAD path."
+            )
             return result
         except Exception as exc:
             return _failure(exc)

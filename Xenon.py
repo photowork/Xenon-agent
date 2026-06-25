@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Union, Tuple
 
-__version__ = "0.3.8"
+__version__ = "0.3.9"
 APP_VERSION = __version__
 
 from xenon_core.cognitive_network import CognitiveNetworkState
@@ -104,6 +104,7 @@ from xenon_core.semantic_router_runtime import (
 )
 from xenon_core.tool_payload_runtime import (
     compress_tool_messages_in_place as core_compress_tool_messages_in_place,
+    externalize_tool_result_for_context as core_externalize_tool_result_for_context,
     summarize_tool_payload_for_context as core_summarize_tool_payload_for_context,
 )
 from xenon_core.turn_compactor import (
@@ -158,6 +159,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 HISTORY_DIR = PROJECT_ROOT / ".agent_history"
 CONTEXT_DIR = PROJECT_ROOT / "Context"
 TRACE_LOG_DIR = PROJECT_ROOT / "logs" / "api_traces"
+TOOL_RESULT_ARCHIVE_DIR = PROJECT_ROOT / "generated" / "tool_results"
+TOOL_RESULT_RETENTION_DAYS = getattr(deepseek_config, "TOOL_RESULT_RETENTION_DAYS", 7)
+TOOL_RESULT_MAX_FILES = getattr(deepseek_config, "TOOL_RESULT_MAX_FILES", 500)
+TOOL_RESULT_MAX_BYTES = getattr(deepseek_config, "TOOL_RESULT_MAX_BYTES", 512 * 1024 * 1024)
 
 API_KEY = deepseek_config.API_KEY
 BASE_URL = deepseek_config.BASE_URL
@@ -178,6 +183,7 @@ except ImportError:
 MAX_RETRY_ATTEMPTS = 3
 NETWORK_RETRY_DELAY = 2
 API_TIMEOUT = 120  # API 请求超时时间（秒）
+TOOL_CALL_TIMEOUT = getattr(deepseek_config, "TOOL_CALL_TIMEOUT", 90)  # 单次工具调用硬超时（秒）
 
 ENABLE_STREAMING = True  # 是否启用流式响应
 ENABLE_THINKING_MODE = getattr(deepseek_config, "ENABLE_THINKING_MODE", True)  # 使用 DeepSeek thinking 开关
@@ -188,7 +194,7 @@ ENABLE_API_REQUEST_LOGGING = True # 开启后会打印所有API请求和响应�
 ENABLE_MEMORY_LOGGING = False  # 开启后会记录所有交互和模型推理过程，包括敏感信息，仅用于调试
 
 # 上下文 token 上限配置
-MAX_CONTEXT_TOKENS_DEFAULT =900000  # 默认上下文上限，可根据需要调整
+MAX_CONTEXT_TOKENS_DEFAULT =1000000  # 默认上下文上限，可根据需要调整
 OUTPUT_TOKEN_RESERVE = 8000  # 为模型输出预留的 token 余量，防止输入+输出超限
 
 # 【测试用】上下文 token 上限，设为 None 使用默认值，设为较小值可快速触发裁剪测试
@@ -321,6 +327,9 @@ class AIAgent:
             print_fn=print,
         )
         self.model = MODEL
+        self._last_request_estimated_tokens = None
+        self._last_api_total_tokens = None
+        self._last_live_context_status = None
 
     def set_model(self, model: str) -> str:
         if model not in AVAILABLE_MODELS:
@@ -502,10 +511,10 @@ class AIAgent:
             max_files=20,
             use_dated_subdir=True,
         )
-        # 计算并缓存真实的 API 请求 token 数，供下一轮 _get_context_token_info 使用
+        # 缓存上一轮实际请求体的估算 token 数，供 WebUI 调试显示使用
         try:
             if self.context_manager and self.context_manager.token_counter:
-                self._last_api_token_count = self.context_manager.token_counter.estimate_total_tokens(
+                self._last_request_estimated_tokens = self.context_manager.token_counter.estimate_total_tokens(
                     messages, tools
                 )
         except Exception:
@@ -596,15 +605,24 @@ class AIAgent:
         print(f"错误: {error}")
         self._add_tool_message(messages, tool_call_id, f"{error_type}错误: {error}")
 
-    def _get_context_token_info(self) -> str:
+    def _get_context_token_info(
+        self,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        system_message: Optional[str] = None,
+    ) -> str:
         """获取上下文token信息"""
+        resolved_messages = messages if messages is not None else self.current_context.copy()
+        resolved_tools = tools if tools is not None else self._get_current_tools()
+        if system_message is None:
+            system_message = self._get_available_tools_message() if messages is None else ""
+
         return core_format_context_token_info(
-            messages=self.current_context.copy(),
-            system_message=self._get_available_tools_message(),
-            current_tools=self._get_current_tools(),
+            messages=resolved_messages,
+            system_message=system_message,
+            current_tools=resolved_tools,
             context_manager=self.context_manager,
             logger=logger,
-            last_api_token_count=getattr(self, '_last_api_token_count', None),
         )
 
     def _build_semantic_router_catalog(self, tool_schemas: List[Dict[str, Any]]) -> str:
@@ -694,6 +712,24 @@ class AIAgent:
 
     def _safe_stringify_result(self, value: Any, max_chars: int = 1500) -> str:
         return safe_stringify_result(value, max_chars=max_chars)
+
+    def _prepare_tool_result_for_context(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        content: str,
+    ) -> str:
+        return core_externalize_tool_result_for_context(
+            content=content,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            archive_dir=TOOL_RESULT_ARCHIVE_DIR,
+            summarize_tool_payload_fn=self._summarize_tool_payload_for_context,
+            retention_days=TOOL_RESULT_RETENTION_DAYS,
+            max_files=TOOL_RESULT_MAX_FILES,
+            max_total_bytes=TOOL_RESULT_MAX_BYTES,
+        )
 
     def _build_tool_call_snapshot(
         self,
@@ -1077,13 +1113,16 @@ class AIAgent:
         使用 ContextManager 中定义的统一阈值。
         返回 True 表示执行了压缩，False 表示未压缩。
         """
-        return core_ensure_context_size(
+        self._cache_live_context_status(messages, tools)
+        trimmed = core_ensure_context_size(
             messages=messages,
             tools=tools,
             context_manager=self.context_manager,
             auto_trim_context_fn=self._auto_trim_context,
             logger=logger,
         )
+        self._cache_live_context_status(messages, tools)
+        return trimmed
 
     def _auto_trim_context(self, messages: List[Dict], tools: List[Dict]):
         """
@@ -1105,6 +1144,7 @@ class AIAgent:
             emergency_context_clear_fn=self._emergency_context_clear,
             logger=logger,
         )
+        self._cache_live_context_status(messages, tools)
 
     def _save_context_summary_to_memory(self, messages: List[Dict]):
         """
@@ -1350,7 +1390,7 @@ class AIAgent:
             emergency_context_clear_fn=self._emergency_context_clear,
             append_conversation_message_fn=self._append_conversation_message,
             save_api_request_fn=self._save_api_request,
-            save_api_usage_fn=lambda tokens: setattr(self, '_last_api_token_count', tokens),
+            save_api_usage_fn=lambda tokens: setattr(self, '_last_api_total_tokens', tokens),
             retry_request_fn=self._retry_request,
             create_completion_fn=self.client.chat.completions.create,
             process_streaming_response_fn=self._process_streaming_response,
@@ -1433,13 +1473,47 @@ class AIAgent:
             self._try_inject_queued_messages(next_messages)
             self._chat(next_messages, next_tools, next_model)
 
+        streaming_content_parts: List[str] = []
+        streaming_reasoning_parts: List[str] = []
+        streaming_chars_since_update = 0
+        streaming_last_update = 0.0
+
+        def stream_callback_with_usage(event: Dict[str, Any]):
+            nonlocal streaming_chars_since_update, streaming_last_update
+            if self._stream_callback:
+                self._stream_callback(event)
+
+            event_type = event.get("type")
+            chunk = str(event.get("content", "") or "")
+            if event_type == "content" and chunk:
+                streaming_content_parts.append(chunk)
+            elif event_type == "thinking" and chunk:
+                streaming_reasoning_parts.append(chunk)
+            else:
+                return
+
+            import time as _time
+            streaming_chars_since_update += len(chunk)
+            now = _time.monotonic()
+            if streaming_chars_since_update < 256 and now - streaming_last_update < 0.75:
+                return
+
+            self._cache_streaming_context_status(
+                messages,
+                tools,
+                "".join(streaming_content_parts),
+                "".join(streaming_reasoning_parts),
+            )
+            streaming_chars_since_update = 0
+            streaming_last_update = now
+
         core_process_streaming_response(
             response=response,
             messages=messages,
             tools=tools,
             interrupted_exception_cls=InterruptedException,
             is_interrupted_fn=lambda: self.interrupted,
-            stream_callback=self._stream_callback,
+            stream_callback=stream_callback_with_usage,
             validate_and_fix_json_fn=self._validate_and_fix_json,
             append_conversation_message_fn=self._append_conversation_message,
             save_memory_log_fn=self._save_memory_log,
@@ -1450,6 +1524,7 @@ class AIAgent:
             logger=logger,
             print_fn=print,
         )
+        self._cache_live_context_status(messages, tools)
 
     def _process_non_streaming_response(self, response, messages: List[Dict], tools: List[Dict]):
         def continue_with_injection(next_messages, next_tools, next_model):
@@ -1471,6 +1546,7 @@ class AIAgent:
             logger=logger,
             print_fn=print,
         )
+        self._cache_live_context_status(messages, tools)
 
     def _validate_and_fix_json(self, json_str: str) -> Optional[str]:
         """改进版 JSON 修复：使用栈跟踪括号，智能添加缺失的闭合括号"""
@@ -1541,11 +1617,50 @@ class AIAgent:
             logger=logger,
         )
 
-    def _get_actual_context_status(self) -> Dict[str, Any]:
+    def _cache_live_context_status(self, messages: List[Dict], tools: List[Dict]) -> Dict[str, Any]:
+        status = core_get_actual_context_status(
+            messages=messages,
+            system_message="",
+            current_tools=tools,
+            context_manager=self.context_manager,
+        )
+        self._last_live_context_status = status
+        return status
+
+    def _cache_streaming_context_status(
+        self,
+        messages: List[Dict],
+        tools: List[Dict],
+        content: str,
+        reasoning_content: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        if not content and not reasoning_content:
+            return None
+
+        assistant_message: Dict[str, Any] = {
+            "role": "assistant",
+            "content": content or "",
+        }
+        if reasoning_content:
+            assistant_message["reasoning_content"] = reasoning_content
+        return self._cache_live_context_status(messages + [assistant_message], tools)
+
+    def _get_actual_context_status(
+        self,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        system_message: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """获取实际的上下文状态"""
+        resolved_messages = messages if messages is not None else self.current_context
+        resolved_tools = tools if tools is not None else self._get_current_tools()
+        if system_message is None:
+            system_message = self._get_available_tools_message() if messages is None else ""
+
         return core_get_actual_context_status(
-            messages=self.current_context,
-            current_tools=self._get_current_tools(),
+            messages=resolved_messages,
+            system_message=system_message,
+            current_tools=resolved_tools,
             context_manager=self.context_manager,
         )
 
@@ -1621,6 +1736,8 @@ class AIAgent:
             stream_callback=self._stream_callback,
             current_phase=self.orchestration_decision.phase if self.orchestration_decision else None,
             logger=logger,
+            tool_timeout_seconds=TOOL_CALL_TIMEOUT,
+            prepare_tool_result_for_context_fn=self._prepare_tool_result_for_context,
         )
 
     def run(self):

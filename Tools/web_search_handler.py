@@ -17,6 +17,14 @@ import threading
 import asyncio
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 
+# 网页解析和学术搜索
+import xml.etree.ElementTree as ET
+import urllib.parse
+import json
+
+# DuckDuckGo 搜索引擎（免费，0 API key，0 配置）
+from ddgs import DDGS
+
 
 class WebSearchTool:
     """网页搜索工具类（核心实现）"""
@@ -581,6 +589,264 @@ class WebSearchTool:
                 loop.run_until_complete(self._close_browser())
         except:
             pass
+
+    # ============================================================
+    # 搜索引擎搜索（DuckDuckGo — 免费，0 API key，0 配置）
+    # ============================================================
+
+    def search_web(
+        self,
+        query: str,
+        max_results: int = 10,
+        timeout: int = 15,
+    ) -> Dict[str, Any]:
+        """
+        使用 DuckDuckGo 搜索互联网（免费，0 API key，0 配置）
+
+        :param query: 搜索关键词
+        :param max_results: 最大结果数，默认10
+        :return: 包含搜索结果的字典
+        """
+        try:
+            request_timeout = max(1, min(int(timeout), 60))
+        except (TypeError, ValueError):
+            request_timeout = 15
+
+        # 先用 DuckDuckGo（ddgs 库）
+        try:
+            ddgs = DDGS(timeout=request_timeout)
+            raw_results = list(ddgs.text(query, max_results=max_results))
+            if raw_results:
+                results = []
+                for r in raw_results:
+                    results.append({
+                        "title": r.get("title", ""),
+                        "url": r.get("href", ""),
+                        "snippet": r.get("body", ""),
+                        "source": "duckduckgo",
+                    })
+                return {
+                    "success": True,
+                    "query": query,
+                    "total_results": len(results),
+                    "results": results,
+                    "method": "duckduckgo",
+                    "message": f"搜索完成，找到 {len(results)} 条结果"
+                }
+        except Exception as e:
+            ddg_error = str(e)
+
+        # DuckDuckGo 失败时回退到 Bing 爬虫
+        try:
+            session = self._get_session()
+            url = f"https://www.bing.com/search?q={urllib.parse.quote(query)}&count={min(max_results, 20)}"
+
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            }
+
+            resp = session.get(url, headers=headers, timeout=request_timeout)
+            resp.raise_for_status()
+
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            results = []
+
+            for li in soup.select('li.b_algo, .b_algo'):
+                title_el = li.select_one('h2 a')
+                snippet_el = li.select_one('.b_caption p, .b_lineclamp2')
+                cite_el = li.select_one('cite')
+
+                if title_el is None:
+                    continue
+
+                results.append({
+                    "title": title_el.get_text(strip=True),
+                    "url": title_el.get('href', ''),
+                    "snippet": snippet_el.get_text(strip=True) if snippet_el else '',
+                    "display_url": cite_el.get_text(strip=True) if cite_el else '',
+                    "source": "bing",
+                })
+
+                if len(results) >= max_results:
+                    break
+
+            return {
+                "success": True,
+                "query": query,
+                "total_results": len(results),
+                "results": results,
+                "method": "bing_fallback",
+                "message": f"搜索完成（Bing回退），找到 {len(results)} 条结果"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "query": query,
+                "error": str(e),
+                "message": f"搜索失败（DuckDuckGo: {ddg_error}; Bing回退也失败: {str(e)}）"
+            }
+
+    # ============================================================
+    # 学术论文搜索（arXiv / Semantic Scholar — 免费 API）
+    # ============================================================
+
+    def search_academic(
+        self,
+        query: str,
+        max_results: int = 10,
+        source: str = "arxiv",
+    ) -> Dict[str, Any]:
+        """
+        搜索学术论文（免费API，无需API key）
+
+        :param query: 搜索关键词
+        :param max_results: 最大结果数，默认10
+        :param source: 数据源，支持 'arxiv'、'semantic_scholar'
+        :return: 包含论文列表的字典
+        """
+        if source == "arxiv":
+            return self._search_arxiv(query, max_results)
+        elif source == "semantic_scholar":
+            return self._search_semantic_scholar(query, max_results)
+        else:
+            return {
+                "success": False,
+                "query": query,
+                "message": f"不支持的学术数据源: {source}，支持: arxiv, semantic_scholar"
+            }
+
+    def _search_arxiv(
+        self,
+        query: str,
+        max_results: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        使用 arXiv API 搜索学术论文（通过 requests 库）
+        """
+        try:
+            session = self._get_session()
+            encoded_query = urllib.parse.quote(query)
+            url = f"http://export.arxiv.org/api/query?search_query=all:{encoded_query}&start=0&max_results={max_results}&sortBy=relevance&sortOrder=descending"
+
+            resp = session.get(url, headers={'User-Agent': 'Xenon/1.0 (Academic Search)'}, timeout=15)
+            resp.raise_for_status()
+
+            root = ET.fromstring(resp.content)
+
+            ns = {
+                'atom': 'http://www.w3.org/2005/Atom',
+                'arxiv': 'http://arxiv.org/schemas/atom',
+            }
+
+            results = []
+            for entry in root.findall('atom:entry', ns):
+                title_el = entry.find('atom:title', ns)
+                summary_el = entry.find('atom:summary', ns)
+                published_el = entry.find('atom:published', ns)
+                updated_el = entry.find('atom:updated', ns)
+                id_el = entry.find('atom:id', ns)
+
+                authors = []
+                for author in entry.findall('atom:author', ns):
+                    name_el = author.find('atom:name', ns)
+                    if name_el is not None:
+                        authors.append(name_el.text)
+
+                results.append({
+                    "title": (title_el.text or "").strip().replace('\n', ' ') if title_el is not None else "",
+                    "authors": authors,
+                    "summary": (summary_el.text or "").strip().replace('\n', ' ')[:500] if summary_el is not None else "",
+                    "published": published_el.text if published_el is not None else "",
+                    "updated": updated_el.text if updated_el is not None else "",
+                    "url": (id_el.text or "").strip() if id_el is not None else "",
+                    "source": "arxiv",
+                })
+
+            return {
+                "success": True,
+                "query": query,
+                "total_results": len(results),
+                "results": results,
+                "source": "arxiv",
+                "message": f"arXiv 搜索完成，找到 {len(results)} 篇论文"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "query": query,
+                "error": str(e),
+                "source": "arxiv",
+                "message": f"arXiv 搜索失败: {str(e)}"
+            }
+
+    def _search_semantic_scholar(
+        self,
+        query: str,
+        max_results: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        使用 Semantic Scholar API 搜索学术论文（通过 requests 库）
+        """
+        try:
+            session = self._get_session()
+            encoded_query = urllib.parse.quote(query)
+            url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={encoded_query}&limit={min(max_results, 20)}&fields=title,authors,year,externalIds,url,abstract,citationCount"
+
+            resp = session.get(
+                url,
+                headers={
+                    'User-Agent': 'Xenon/1.0 (Scholar Search; mail@xenon.local)',
+                    'Accept': 'application/json',
+                },
+                timeout=15,
+            )
+
+            if resp.status_code == 429:
+                return {
+                    "success": False,
+                    "query": query,
+                    "message": "Semantic Scholar API 请求过于频繁，请稍后再试",
+                    "source": "semantic_scholar",
+                    "results": [],
+                }
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            results = []
+            for paper in data.get('data', []):
+                authors = []
+                for author in paper.get('authors', []):
+                    authors.append(author.get('name', ''))
+
+                results.append({
+                    "title": paper.get('title', ''),
+                    "authors": authors,
+                    "year": paper.get('year', ''),
+                    "abstract": (paper.get('abstract') or '')[:500],
+                    "url": paper.get('url', ''),
+                    "citation_count": paper.get('citationCount', 0),
+                    "source": "semantic_scholar",
+                })
+
+            return {
+                "success": True,
+                "query": query,
+                "total_results": len(results),
+                "results": results,
+                "source": "semantic_scholar",
+                "message": f"Semantic Scholar 搜索完成，找到 {len(results)} 篇论文"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "query": query,
+                "error": str(e),
+                "source": "semantic_scholar",
+                "message": f"Semantic Scholar 搜索失败: {str(e)}"
+            }
 
     async def click_element(
         self,
@@ -2333,3 +2599,44 @@ class WebSearchToolManager:
             return self.tool.get_element_text_sync(url, selector, timeout)
         except Exception as e:
             return {"success": False, "error": f"获取元素文本失败: {str(e)}"}
+
+    # ============================================================
+    # 搜索引擎搜索（包装方法）
+    # ============================================================
+
+    def search_web(
+        self,
+        query: str,
+        max_results: int = 10,
+        timeout: int = 15,
+    ) -> Dict[str, Any]:
+        """
+        使用 DuckDuckGo 搜索互联网（免费，0 API key，0 配置，失败时自动回退 Bing）
+
+        :param query: 搜索关键词
+        :param max_results: 最大结果数，默认10
+        :return: 包含搜索结果的字典
+        """
+        try:
+            return self.tool.search_web(query, max_results, timeout)
+        except Exception as e:
+            return {"success": False, "error": f"搜索失败: {str(e)}"}
+
+    def search_academic(
+        self,
+        query: str,
+        max_results: int = 10,
+        source: str = "arxiv",
+    ) -> Dict[str, Any]:
+        """
+        搜索学术论文（免费API，无需API key）
+
+        :param query: 搜索关键词
+        :param max_results: 最大结果数，默认10
+        :param source: 数据源，支持 'arxiv'、'semantic_scholar'
+        :return: 包含论文列表的字典
+        """
+        try:
+            return self.tool.search_academic(query, max_results, source)
+        except Exception as e:
+            return {"success": False, "error": f"学术搜索失败: {str(e)}"}

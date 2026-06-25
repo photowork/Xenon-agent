@@ -30,6 +30,9 @@ class XenonLiveBridge:
     def __init__(self, config_path):
         self.config_path = Path(config_path).resolve()
         self.config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        missing = [key for key in ("port", "token", "worker_path") if key not in self.config]
+        if missing:
+            raise ValueError(f"Invalid Xenon live bridge config {self.config_path}: missing {', '.join(missing)}")
         self.log_path = self.config_path.with_suffix(".log")
         self.host = "127.0.0.1"
         self.port = int(self.config["port"])
@@ -128,8 +131,24 @@ def start_bridge(config_path):
 
 
 def _config_from_arguments():
-    args = [Path(str(item).strip().strip('"')) for item in sys.argv[1:] if item != "--pass"]
-    configs = [item for item in args if item.suffix.lower() == ".json" and item.is_file()]
+    raw_args = [str(item).strip().strip('"') for item in sys.argv[1:]]
+    candidates = []
+    for index, item in enumerate(raw_args):
+        if item == "--pass" and index + 1 < len(raw_args):
+            candidates.append(Path(raw_args[index + 1]))
+    # Some FreeCAD builds strip the --pass marker before exposing sys.argv to
+    # the Python script, so keep a validated JSON fallback.
+    candidates.extend(Path(item) for item in raw_args if item != "--pass")
+    configs = []
+    for item in candidates:
+        if item.suffix.lower() != ".json" or not item.is_file():
+            continue
+        try:
+            config = json.loads(item.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(config, dict) and all(key in config for key in ("port", "token", "worker_path")):
+            configs.append(item)
     return configs[-1] if configs else None
 
 

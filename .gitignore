@@ -63,3 +63,8 @@ config/*.json
 
 # === Runtime Logs ===
 memory_log.txt
+
+# === Runtime Logs — additional ===
+*.log
+webui/提示词.txt
+xenon_core/deepseek_v3_tokenizer/

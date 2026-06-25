@@ -23,11 +23,8 @@ class MemoryQueryHandler:
     DEFAULT_MEMORY_DIR = "Memory/memory_Write"
     DEFAULT_ENCODING = 'utf-8'
     
-    def __init__(self, memory_dir: str = None):
-        if memory_dir is None:
-            self.memory_dir = Path(self.DEFAULT_MEMORY_DIR)
-        else:
-            self.memory_dir = Path(memory_dir)
+    def __init__(self, *_, **_compat_kwargs):
+        self.memory_dir = Path(self.DEFAULT_MEMORY_DIR)
     
     @staticmethod
     def _make_memory_filename(timestamp: str, summary: str = None) -> str:
@@ -280,9 +277,9 @@ class SmartMemoryHandler(MemoryQueryHandler):
     EXECUTION_LOG_RETENTION_DAYS = 1
     EXECUTION_LOG_CLEANUP_INTERVAL_SECONDS = 3600
     
-    def __init__(self, memory_dir: str = None, enable_network: bool = False,
-                 execution_log_dir: str = None):
-        super().__init__(memory_dir)
+    def __init__(self, *_, enable_network: bool = False,
+                 execution_log_dir: str = None, **_compat_kwargs):
+        super().__init__()
         
         self.enable_network = False
         self.memory_graph = MemoryGraph()
@@ -293,8 +290,6 @@ class SmartMemoryHandler(MemoryQueryHandler):
         # 执行日志目录：与记忆目录分离，避免污染记忆查询
         if execution_log_dir:
             self.execution_log_dir = Path(execution_log_dir)
-        elif memory_dir:
-            self.execution_log_dir = Path(memory_dir).parent / "execution_logs"
         else:
             self.execution_log_dir = Path(self.DEFAULT_EXECUTION_LOG_DIR)
         
@@ -1360,181 +1355,166 @@ class SmartMemoryHandler(MemoryQueryHandler):
 class SmartMemoryToolManager:
     """智能记忆工具管理器"""
     
-    def __init__(self, memory_dir: str = None, enable_network: bool = False,
-                 execution_log_dir: str = None):
-        self.memory_dir = memory_dir
+    def __init__(self, *_, enable_network: bool = False,
+                 execution_log_dir: str = None, **_compat_kwargs):
         self.enable_network = False
         self.execution_log_dir = execution_log_dir
         self.handlers = {}
     
-    def _get_handler(self, memory_dir: str = None) -> SmartMemoryHandler:
-        dir_path = memory_dir if memory_dir else self.memory_dir
-        key = dir_path if dir_path else "default"
+    def _get_handler(self) -> SmartMemoryHandler:
+        key = "fixed_memory_write"
         
         if key not in self.handlers:
             self.handlers[key] = SmartMemoryHandler(
-                memory_dir=dir_path,
                 enable_network=self.enable_network,
                 execution_log_dir=self.execution_log_dir,
             )
         
         return self.handlers[key]
     
-    def list_memories(self, limit: int = 20, sort_by: str = 'newest', 
-                     memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def list_memories(self, limit: int = 20, sort_by: str = 'newest') -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.list_memories(limit, sort_by)
     
-    def read_memory(self, filename: str, encoding: str = 'utf-8', 
-                   memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def read_memory(self, filename: str, encoding: str = 'utf-8') -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.read_memory(filename, encoding)
     
     def search_memories(self, keyword: str, limit: int = 10, 
                        case_sensitive: bool = False,
-                       memory_dir: str = None, tags: List[str] = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+                       tags: List[str] = None) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.search_memories(keyword, limit, case_sensitive, tags)
     
     def write_memory(self, content: str, summary: str = None,
-                    encoding: str = 'utf-8',
-                    memory_dir: str = None, tags: List[str] = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+                    encoding: str = 'utf-8', tags: List[str] = None) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.write_memory(content, summary, encoding, tags)
     
-    def get_memory_with_tags(self, limit: int = 20, sort_by: str = 'newest', memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def get_memory_with_tags(self, limit: int = 20, sort_by: str = 'newest') -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.get_memory_with_tags(limit, sort_by)
     
-    def get_tag_stats(self, memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def get_tag_stats(self) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.get_tag_stats()
     
     def list_cognitive_memories(self, cognitive_type: str = None, state: str = "active",
-                                limit: int = 20, memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+                                limit: int = 20) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.list_cognitive_memories(cognitive_type, state, limit)
 
-    def get_cognitive_state(self, current_query: str = "", limit: int = 10,
-                            memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def get_cognitive_state(self, current_query: str = "", limit: int = 10) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.get_cognitive_state(current_query, limit)
 
     def build_phase_summary(self, current_query: str = "", current_phase: str = "",
                             current_intent: str = "", limit: int = 8,
-                            recent_failures: List[str] = None, memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+                            recent_failures: List[str] = None) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.build_phase_summary(current_query, current_phase, current_intent, limit, recent_failures)
 
     def get_activation_set(self, current_query: str = "", current_phase: str = "",
                            current_intent: str = "", limit: int = 5,
-                           recent_failures: List[str] = None, memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+                           recent_failures: List[str] = None) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.get_activation_set(current_query, current_phase, current_intent, limit, recent_failures)
 
     def write_execution_memory(self, goal: str, phase: str, tool_name: str, success: bool,
                                blockage_reason: str = None, lesson: str = "", summary: str = "",
-                               next_actions: List[str] = None, memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+                               next_actions: List[str] = None) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.write_execution_memory(goal, phase, tool_name, success, blockage_reason, lesson, summary, next_actions)
     
-    def cleanup_memories(self, days_old: int = 30, min_importance: float = 0.3,
-                        memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def cleanup_memories(self, days_old: int = 30, min_importance: float = 0.3) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.cleanup_memories(days_old, min_importance)
 
-    def cleanup_execution_logs(self, retention_days: int = SmartMemoryHandler.EXECUTION_LOG_RETENTION_DAYS,
-                               memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def cleanup_execution_logs(self, retention_days: int = SmartMemoryHandler.EXECUTION_LOG_RETENTION_DAYS) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.cleanup_execution_logs(retention_days)
 
-    def export_memories(self, format: str = "json", include_content: bool = True,
-                       memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def export_memories(self, format: str = "json", include_content: bool = True) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.export_memories(format, include_content)
     
-    def get_latest_memory(self, encoding: str = 'utf-8', 
-                         memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def get_latest_memory(self, encoding: str = 'utf-8') -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.get_latest_memory(encoding)
     
-    def get_memory_by_date(self, date_str: str, 
-                          memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def get_memory_by_date(self, date_str: str) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.get_memory_by_date(date_str)
     
-    def get_memory_summary(self, limit: int = 5, 
-                          memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def get_memory_summary(self, limit: int = 5) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.get_memory_summary(limit)
     
     def append_to_memory(self, filename: str, content: str, 
-                         encoding: str = 'utf-8', memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+                         encoding: str = 'utf-8') -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.append_to_memory(filename, content, encoding)
     
-    def batch_delete_memories(self, filenames: List[str], memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def batch_delete_memories(self, filenames: List[str]) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.batch_delete_memories(filenames)
     
-    def delete_memory(self, filename: str, memory_dir: str = None) -> Dict[str, Any]:
-        handler = self._get_handler(memory_dir)
+    def delete_memory(self, filename: str) -> Dict[str, Any]:
+        handler = self._get_handler()
         return handler.delete_memory(filename)
 
 default_manager = SmartMemoryToolManager()
 
-def list_memories(limit: int = 20, sort_by: str = 'newest', memory_dir: str = None):
-    return default_manager.list_memories(limit, sort_by, memory_dir)
+def list_memories(limit: int = 20, sort_by: str = 'newest'):
+    return default_manager.list_memories(limit, sort_by)
 
-def read_memory(filename: str, encoding: str = 'utf-8', memory_dir: str = None):
-    return default_manager.read_memory(filename, encoding, memory_dir)
+def read_memory(filename: str, encoding: str = 'utf-8'):
+    return default_manager.read_memory(filename, encoding)
 
 def search_memories(keyword: str, limit: int = 10, case_sensitive: bool = False, 
-                   memory_dir: str = None, tags: List[str] = None):
-    return default_manager.search_memories(keyword, limit, case_sensitive, memory_dir, tags)
+                   tags: List[str] = None):
+    return default_manager.search_memories(keyword, limit, case_sensitive, tags)
 
 def write_memory(content: str, summary: str = None, encoding: str = 'utf-8',
-                memory_dir: str = None, tags: List[str] = None):
-    return default_manager.write_memory(content, summary, encoding, memory_dir, tags)
+                tags: List[str] = None):
+    return default_manager.write_memory(content, summary, encoding, tags)
 
-def get_memory_with_tags(limit: int = 20, sort_by: str = 'newest', memory_dir: str = None):
-    return default_manager.get_memory_with_tags(limit, sort_by, memory_dir)
+def get_memory_with_tags(limit: int = 20, sort_by: str = 'newest'):
+    return default_manager.get_memory_with_tags(limit, sort_by)
 
-def get_tag_stats(memory_dir: str = None):
-    return default_manager.get_tag_stats(memory_dir)
+def get_tag_stats():
+    return default_manager.get_tag_stats()
 
 def list_cognitive_memories(cognitive_type: str = None, state: str = "active",
-                           limit: int = 20, memory_dir: str = None):
-    return default_manager.list_cognitive_memories(cognitive_type, state, limit, memory_dir)
+                           limit: int = 20):
+    return default_manager.list_cognitive_memories(cognitive_type, state, limit)
 
-def get_cognitive_state(current_query: str = "", limit: int = 10, memory_dir: str = None):
-    return default_manager.get_cognitive_state(current_query, limit, memory_dir)
+def get_cognitive_state(current_query: str = "", limit: int = 10):
+    return default_manager.get_cognitive_state(current_query, limit)
 
 def build_phase_summary(current_query: str = "", current_phase: str = "", current_intent: str = "",
-                       limit: int = 8, recent_failures: List[str] = None, memory_dir: str = None):
+                       limit: int = 8, recent_failures: List[str] = None):
     return default_manager.build_phase_summary(
         current_query,
         current_phase,
         current_intent,
         limit,
         recent_failures,
-        memory_dir,
     )
 
 def get_activation_set(current_query: str = "", current_phase: str = "", current_intent: str = "",
-                      limit: int = 5, recent_failures: List[str] = None, memory_dir: str = None):
+                      limit: int = 5, recent_failures: List[str] = None):
     return default_manager.get_activation_set(
         current_query,
         current_phase,
         current_intent,
         limit,
         recent_failures,
-        memory_dir,
     )
 
 def write_execution_memory(goal: str, phase: str, tool_name: str, success: bool,
-                          blockage_reason: str = None, lesson: str = "", summary: str = "",
-                          next_actions: List[str] = None, memory_dir: str = None):
+                           blockage_reason: str = None, lesson: str = "", summary: str = "",
+                          next_actions: List[str] = None):
     return default_manager.write_execution_memory(
         goal,
         phase,
@@ -1544,35 +1524,33 @@ def write_execution_memory(goal: str, phase: str, tool_name: str, success: bool,
         lesson,
         summary,
         next_actions,
-        memory_dir,
     )
 
-def cleanup_memories(days_old: int = 30, min_importance: float = 0.3, memory_dir: str = None):
-    return default_manager.cleanup_memories(days_old, min_importance, memory_dir)
+def cleanup_memories(days_old: int = 30, min_importance: float = 0.3):
+    return default_manager.cleanup_memories(days_old, min_importance)
 
 def cleanup_execution_logs(
     retention_days: int = SmartMemoryHandler.EXECUTION_LOG_RETENTION_DAYS,
-    memory_dir: str = None,
 ):
-    return default_manager.cleanup_execution_logs(retention_days, memory_dir)
+    return default_manager.cleanup_execution_logs(retention_days)
 
-def export_memories(format: str = "json", include_content: bool = True, memory_dir: str = None):
-    return default_manager.export_memories(format, include_content, memory_dir)
+def export_memories(format: str = "json", include_content: bool = True):
+    return default_manager.export_memories(format, include_content)
 
-def get_latest_memory(encoding: str = 'utf-8', memory_dir: str = None):
-    return default_manager.get_latest_memory(encoding, memory_dir)
+def get_latest_memory(encoding: str = 'utf-8'):
+    return default_manager.get_latest_memory(encoding)
 
-def get_memory_by_date(date_str: str, memory_dir: str = None):
-    return default_manager.get_memory_by_date(date_str, memory_dir)
+def get_memory_by_date(date_str: str):
+    return default_manager.get_memory_by_date(date_str)
 
-def get_memory_summary(limit: int = 5, memory_dir: str = None):
-    return default_manager.get_memory_summary(limit, memory_dir)
+def get_memory_summary(limit: int = 5):
+    return default_manager.get_memory_summary(limit)
 
-def append_to_memory(filename: str, content: str, encoding: str = 'utf-8', memory_dir: str = None):
-    return default_manager.append_to_memory(filename, content, encoding, memory_dir)
+def append_to_memory(filename: str, content: str, encoding: str = 'utf-8'):
+    return default_manager.append_to_memory(filename, content, encoding)
 
-def batch_delete_memories(filenames: List[str], memory_dir: str = None):
-    return default_manager.batch_delete_memories(filenames, memory_dir)
+def batch_delete_memories(filenames: List[str]):
+    return default_manager.batch_delete_memories(filenames)
 
-def delete_memory(filename: str, memory_dir: str = None):
-    return default_manager.delete_memory(filename, memory_dir)
+def delete_memory(filename: str):
+    return default_manager.delete_memory(filename)

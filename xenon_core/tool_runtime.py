@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import ast
 import copy
+import importlib
 import importlib.util
 import inspect
 import logging
 import re
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, get_type_hints
@@ -76,21 +79,25 @@ class ToolManager:
                 continue
 
             module_files.append(file_path)
+            if depth > 1 and not self._file_declares_manager_class(file_path):
+                continue
+
             module_name = file_path.stem
+            import_name = self._get_import_name(relative_path)
             try:
-                spec = importlib.util.spec_from_file_location(module_name, file_path)
+                spec = importlib.util.spec_from_file_location(import_name, file_path)
                 if not spec or not spec.loader:
                     raise ImportError("无法创建模块加载器")
 
                 module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                self._exec_module_with_package_context(import_name, module, spec)
 
                 manager_classes = []
                 for name, obj in inspect.getmembers(module):
                     if (
                         inspect.isclass(obj)
                         and (name.endswith("ToolManager") or name.endswith("Manager"))
-                        and obj.__module__ == module_name
+                        and obj.__module__ == module.__name__
                     ):
                         manager_classes.append((name, obj))
 
@@ -106,6 +113,7 @@ class ToolManager:
                         successes.append(
                             {
                                 "module_name": module_name,
+                                "import_name": import_name,
                                 "manager_class": name,
                                 "tool_name": tool_name,
                                 "path": str(file_path),
@@ -118,6 +126,7 @@ class ToolManager:
                         failures.append(
                             {
                                 "module_name": module_name,
+                                "import_name": import_name,
                                 "manager_class": name,
                                 "path": str(file_path),
                                 "error": str(exc),
@@ -132,6 +141,7 @@ class ToolManager:
                 failures.append(
                     {
                         "module_name": module_name,
+                        "import_name": import_name,
                         "path": str(file_path),
                         "error": str(exc),
                     }
@@ -150,6 +160,52 @@ class ToolManager:
                 "successes": successes,
                 "failures": failures,
             }
+
+    def _get_import_name(self, relative_path: Path) -> str:
+        return ".".join(relative_path.with_suffix("").parts)
+
+    def _file_declares_manager_class(self, file_path: Path) -> bool:
+        try:
+            tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
+        except Exception:
+            return True
+
+        return any(
+            isinstance(node, ast.ClassDef)
+            and (node.name.endswith("ToolManager") or node.name.endswith("Manager"))
+            for node in tree.body
+        )
+
+    def _exec_module_with_package_context(self, import_name: str, module: Any, spec: Any) -> None:
+        """Execute a tool module with enough package context for relative imports."""
+        tools_dir_str = str(self.tools_dir)
+        inserted_path = False
+        previous_module = sys.modules.get(import_name)
+
+        if tools_dir_str not in sys.path:
+            sys.path.insert(0, tools_dir_str)
+            inserted_path = True
+
+        try:
+            package_name = import_name.rpartition(".")[0]
+            if package_name:
+                importlib.import_module(package_name)
+
+            previous_module = sys.modules.get(import_name)
+            sys.modules[import_name] = module
+            spec.loader.exec_module(module)
+        except Exception:
+            if previous_module is not None:
+                sys.modules[import_name] = previous_module
+            else:
+                sys.modules.pop(import_name, None)
+            raise
+        finally:
+            if inserted_path:
+                try:
+                    sys.path.remove(tools_dir_str)
+                except ValueError:
+                    pass
 
     def _generate_tool_schema_to_list(self, tool_name: str, manager_instance: Any, schema_list: List[Dict]):
         for method_name in dir(manager_instance):

@@ -1,4 +1,4 @@
-# FreeCAD Handler
+﻿# FreeCAD Handler
 
 `Tools/freecad_handler/freecad_handler.py` lets Xenon create and inspect FreeCAD models through
 structured JSON-friendly actions. Modeling runs in FreeCAD's bundled Python
@@ -194,9 +194,11 @@ positions, so the agent does not need to guess.
 - `arc`: `start`, `mid`, `end`
 - `polyline`: `points`, optional `closed`, `face`
 - `rectangle`: `x`, `y`, `z`, `width`, `height`, optional `face`
+- `bspline`: `poles` (2+ control points), optional `degree`, `closed`, `knots`, `weights`, `face`
+- `bezier`: `poles` (2+ control points), optional `degree`, `face`
 - `create_sketch`: `geometry`, optional solver-driven `constraints`
 
-Sketch geometry supports `line`, `circle`, and `arc`. Constraints use a FreeCAD
+Sketch geometry supports `line`, `circle`, `arc`, `bspline`, and `bezier`. Constraints use a FreeCAD
 constraint type plus an argument list:
 
 ```json
@@ -228,37 +230,82 @@ constraint type plus an argument list:
 ### Part Design
 
 - `create_body`
+- `create_datum_plane`: `attachment` (xy/xz/yz or object ref), optional `body`, `offset`, `placement`
+- `create_datum_axis`: `attachment` (x/y/z or object ref), optional `body`, `placement`
+- `create_datum_point`: optional `body`, `attachment`, `position` (3-vector), `placement`
 - `create_sketch`: add `body` and optional `support` (`xy`, `xz`, `yz`)
 - `pad`, `pocket`: `body`, `profile`, `length`
 - `partdesign_linear_pattern`: `body`, `original`, `direction`, `length`, `occurrences`
 - `partdesign_polar_pattern`: `body`, `original`, `axis`, `angle`, `occurrences`
 - `partdesign_mirror`: `body`, `original`, `plane`
 - `partdesign_thickness`: `body`, `source`, `faces`, `thickness`
+- `groove`: `body`, `profile`, optional `axis` (`x`/`y`/`z` or 3-vector), `angle`, `reversed`, `midplane`
+- `hole`: `body`, `profile`, optional `hole_type` (through/blind/counterbore/countersink), `thread_type` (none/metric/metric_fine), `diameter`, `depth`, `thread_depth`, `drill_point` (flat/angled/sphere), `model_thread`
+- `partdesign_pipe`: `body`, `path`, optional `profile`/`profiles`, `transition` (transformed/linear/frenet), `keep_source`
 
 ### Advanced Features
 
 - `linear_array`, `polar_array`, `mirror`, `shell`
+- `loft`: `profiles` (2+ object names), optional `ruled`, `closed`, `keep_profiles`
+- `sweep`: `path` (object name), `profiles` (list), optional `make_solid`, `frenet`, `keep_source`
 - `thread_helix`: a cosmetic/centerline helix
 - `thread`: a swept triangular thread solid; optionally fuse or cut it with `source`
 - `create_assembly`, `assembly_link`
+
+#### Groove, loft, and sweep examples
+
+Groove cuts a slot by revolving a sketch around an axis:
+
+```json
+{"op": "groove", "id": "slot", "body": "body", "profile": "slot_sketch", "axis": "z", "angle": 360}
+```
+
+Loft transitions through multiple profile sketches:
+
+```json
+{"op": "loft", "id": "transition", "profiles": ["circle_bottom", "square_mid", "circle_top"], "ruled": true}
+```
+
+Sweep extrudes a profile along a path wire:
+
+```json
+{"op": "sweep", "id": "tube", "path": "spine_wire", "profiles": ["ring_section"], "make_solid": true}
+```
 
 ### TechDraw
 
 - `techdraw_page`: creates an SVG-template page
 - `techdraw_view`: places a source object on a page
 - `techdraw_dimension`: adds a projected dimension with optional upper/lower tolerance
+- `techdraw_section_view`: creates a section view with `section_direction` (x/y/z or 3-vector), `section_origin`, `scale`
+- `techdraw_annotation`: adds a text annotation with `text`, `x`, `y`, `font_size`
+- `techdraw_balloon`: adds a callout balloon with `text`, `view`, `origin_x`/`origin_y`, `x`/`y`
+
+### Draft Workbench
+
+- `shape_string`: `string`, `font_path` (.ttf/.otf), optional `size`, `extrude`, `position`
+- `draft_array`: `source`, `array_type` (orthogonal/polar), for orthogonal use `count_x`/`count_y`/`interval_x`/`interval_y`
+- `draft_clone`: `source`, optional `placement`
+- `import_dxf`: `file_path`, optional `as_sketch`, `layer_filter`
 
 ## Drawing Recognition And Visual Iteration
 
-`analyze_drawing_image` detects lines and circles with OpenCV and reads
-dimension text through Tesseract OCR when the `tesseract.exe` program is
-installed. Missing OCR is returned in `ocr_error`; it is never silently
-ignored.
+`analyze_drawing_image` is layout/visual first. When a PaddleOCR-VL sidecar JSON
+exists next to the source image, it is used to find drawing view regions and
+metadata such as material, unit, scale, and title-block text. OpenCV line/circle
+detection then runs inside those view regions; without a sidecar it falls back
+to the full image.
 
-`create_model_from_drawing` only auto-builds a conservative simple top-view
-plate when width, height, and thickness are available. It always returns
-`review_required=true`. Complex multi-view drawings still require an agent to
-review the recognized dimensions and construct the action scenario.
+OCR is auxiliary metadata only. Tesseract text, OCR dimensions, thread specs,
+angles, and surface roughness are returned as candidates for human/agent review,
+but they are not modeling authority.
+
+`create_model_from_drawing` no longer auto-reconstructs a model by default from
+OCR dimensions. The preferred flow is `analyze_drawing_image`, review the visual
+evidence, build explicit structured actions, then use `execute_scenario`,
+`render_preview`, and `inspect_document` to validate the FreeCAD result. The old
+simple top-view plate experiment remains available only with
+`allow_legacy_ocr_plate=true` and always reports `review_required=true`.
 
 `compare_visuals` scores a rendered image against a reference. Use
 `evaluate_visual_iteration`, or `render_live_preview` plus `compare_visuals`,
@@ -267,9 +314,10 @@ to repeat the render/compare/edit loop.
 Every shape-producing action requires a unique `id`. Later actions reference
 earlier shapes by this ID.
 
-Boolean operations, extrude, revolve, move, rotate, fillet, and chamfer hide
-their source objects by default. Use `keep_source` or `keep_sources` when the
-source objects should remain visible.
+Boolean operations, extrude, revolve, move, rotate, fillet, chamfer, groove,
+loft, and sweep hide their source objects by default. Use `keep_source`,
+`keep_sources`, or `keep_profiles` (for `loft`) when the source objects should
+remain visible.
 
 ## Exports and Preview
 

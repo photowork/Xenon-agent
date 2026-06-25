@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -22,6 +24,13 @@ MUTATING_TOOL_NAME_PARTS = (
     "move",
     "copy",
 )
+
+
+class ToolExecutionTimeout(TimeoutError):
+    def __init__(self, tool_name: str, timeout_seconds: float):
+        self.tool_name = tool_name
+        self.timeout_seconds = timeout_seconds
+        super().__init__(f"Tool {tool_name} timed out after {timeout_seconds:g} seconds")
 
 
 def touch_tool_usage(
@@ -61,6 +70,8 @@ def execute_tool_call(
     logger: Any,
     print_fn: Callable[..., Any] = print,
     now_fn: Callable[[], Any] = datetime.now,
+    tool_timeout_seconds: Optional[float] = None,
+    prepare_tool_result_for_context_fn: Optional[Callable[..., str]] = None,
 ) -> None:
     arguments: Optional[Dict[str, Any]] = None
     try:
@@ -89,9 +100,22 @@ def execute_tool_call(
                     "content": build_tool_execution_progress_message(tool_name, arguments),
                 }
             )
-        result = execute_tool_fn(tool_name, arguments)
+        result = _execute_tool_with_timeout(
+            tool_name=tool_name,
+            arguments=arguments,
+            execute_tool_fn=execute_tool_fn,
+            timeout_seconds=tool_timeout_seconds,
+        )
         result_text = str(result)
         display_result_text = build_compact_tool_result_preview(tool_name, arguments, result)
+        context_result_text = result_text
+        if prepare_tool_result_for_context_fn is not None:
+            context_result_text = prepare_tool_result_for_context_fn(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                content=result_text,
+            )
         print_fn(f"\033[38;2;86;114;79m结果: \033[0m\033[38;2;86;114;79m{display_result_text}\033[0m\n")
 
         record_tool_outcome_fn(
@@ -114,11 +138,11 @@ def execute_tool_call(
                 {
                     "type": "tool_result",
                     "tool_call_id": tool_call_id,
-                    "content": display_result_text,
+                    "content": context_result_text,
                 }
             )
 
-        add_tool_message_fn(messages, tool_call_id, result_text)
+        add_tool_message_fn(messages, tool_call_id, context_result_text)
 
     except json.JSONDecodeError as error:
         logger.error("JSON解析失败: %s", error)
@@ -166,6 +190,41 @@ def execute_tool_call(
 
     finally:
         set_tool_executing_fn(False)
+
+
+def _execute_tool_with_timeout(
+    *,
+    tool_name: str,
+    arguments: Dict[str, Any],
+    execute_tool_fn: Callable[[str, Dict[str, Any]], Any],
+    timeout_seconds: Optional[float],
+) -> Any:
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return execute_tool_fn(tool_name, arguments)
+
+    result_queue: "queue.Queue[tuple[str, Any]]" = queue.Queue(maxsize=1)
+
+    def run_tool() -> None:
+        try:
+            result_queue.put(("result", execute_tool_fn(tool_name, arguments)))
+        except Exception as error:
+            result_queue.put(("error", error))
+
+    worker = threading.Thread(
+        target=run_tool,
+        name=f"xenon-tool-{_truncate_text(tool_name, 48)}",
+        daemon=True,
+    )
+    worker.start()
+
+    try:
+        result_type, value = result_queue.get(timeout=float(timeout_seconds))
+    except queue.Empty as error:
+        raise ToolExecutionTimeout(tool_name, float(timeout_seconds)) from error
+
+    if result_type == "error":
+        raise value
+    return value
 
 
 def build_tool_execution_progress_message(tool_name: str, arguments: Dict[str, Any]) -> str:

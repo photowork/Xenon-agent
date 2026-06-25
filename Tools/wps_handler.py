@@ -67,8 +67,10 @@ APP_ALIASES = {
 # Office/WPS late-binding constants used by the high-level helpers.
 WD_COLLAPSE_END = 0
 WD_COLLAPSE_START = 1
+WD_FIND_STOP = 0
 WD_STORY = 6
 WD_PAGE_BREAK = 7
+WD_REPLACE_ONE = 1
 WD_REPLACE_ALL = 2
 MSO_TEXT_ORIENTATION_HORIZONTAL = 1
 PP_LAYOUT_BLANK = 12
@@ -122,6 +124,11 @@ def _serializable(value: Any, depth: int = 0) -> Any:
     except Exception:
         pass
     return str(value)
+
+
+def _normalize_writer_text(text: Any) -> str:
+    """Normalize WPS/Word paragraph marks to regular newlines for tool output."""
+    return str(text or "").replace("\r\n", "\n").replace("\r", "\n")
 
 
 class WpsAutomation:
@@ -338,6 +345,278 @@ class WpsAutomation:
         if style.get("style_name"):
             selection.Style = style["style_name"]
 
+    def _duplicate_range(self, range_obj: Any) -> Any:
+        duplicate = getattr(range_obj, "Duplicate", None)
+        if duplicate is None:
+            return range_obj
+        candidate = duplicate() if callable(duplicate) else duplicate
+        try:
+            getattr(candidate, "Find")
+        except Exception:
+            return range_obj
+        return candidate
+
+    def _range_from_bounds(self, document: Any, start: int, end: int) -> Any:
+        try:
+            return document.Range(int(start), int(end))
+        except Exception:
+            range_obj = self._duplicate_range(document.Content)
+            range_obj.SetRange(int(start), int(end))
+            return range_obj
+
+    def _range_bounds(self, range_obj: Any) -> Dict[str, Optional[int]]:
+        bounds: Dict[str, Optional[int]] = {"start": None, "end": None}
+        for key, member in (("start", "Start"), ("end", "End")):
+            try:
+                bounds[key] = int(getattr(range_obj, member))
+            except Exception:
+                bounds[key] = None
+        return bounds
+
+    def find_writer_range(
+        self,
+        document: Any,
+        anchor_text: str,
+        occurrence: int = 1,
+        match_case: bool = False,
+        match_whole_word: bool = False,
+        match_wildcards: bool = False,
+    ) -> Tuple[Any, int]:
+        anchor = str(anchor_text or "")
+        if not anchor:
+            raise ValueError("anchor_text must not be empty")
+        occurrence = int(occurrence)
+        if occurrence < 1:
+            raise ValueError("occurrence must be greater than or equal to 1")
+
+        content_range = self._duplicate_range(document.Content)
+        try:
+            story_end = int(getattr(document.Content, "End"))
+        except Exception:
+            story_end = int(getattr(content_range, "End", 0) or 0)
+
+        matches_found = 0
+        search_range = content_range
+        while True:
+            find = search_range.Find
+            try:
+                find.ClearFormatting()
+            except Exception:
+                pass
+            executed = find.Execute(
+                anchor,
+                bool(match_case),
+                bool(match_whole_word),
+                bool(match_wildcards),
+                False,
+                False,
+                True,
+                WD_FIND_STOP,
+                False,
+            )
+            found = bool(executed)
+            if not found:
+                try:
+                    found = bool(getattr(find, "Found"))
+                except Exception:
+                    found = False
+            if not found:
+                break
+
+            matches_found += 1
+            if matches_found == occurrence:
+                return search_range, matches_found
+
+            next_start = int(getattr(search_range, "End", story_end))
+            if next_start >= story_end:
+                break
+            search_range = self._range_from_bounds(document, next_start, story_end)
+
+        if matches_found:
+            raise ValueError(
+                f"Text anchor occurrence {occurrence} was not found: {anchor} "
+                f"(matches found: {matches_found})"
+            )
+        raise ValueError(f"Text anchor was not found: {anchor}")
+
+    def find_writer_text(
+        self,
+        app: Any,
+        find_text: str,
+        occurrence: int,
+        match_case: bool,
+        match_whole_word: bool,
+        match_wildcards: bool,
+        select_match: bool,
+    ) -> Dict[str, Any]:
+        document = self.get_or_create_file(app, "writer", create_if_missing=False)
+        target_range, matches_found = self.find_writer_range(
+            document,
+            find_text,
+            occurrence,
+            match_case,
+            match_whole_word,
+            match_wildcards,
+        )
+        if select_match:
+            target_range.Select()
+        return {
+            "found": True,
+            "find_text": str(find_text),
+            "occurrence": int(occurrence),
+            "matches_scanned": matches_found,
+            "selected": bool(select_match),
+            **self._range_bounds(target_range),
+        }
+
+    def insert_writer_text_at_anchor(
+        self,
+        app: Any,
+        anchor_text: str,
+        text: str,
+        position: str,
+        style: Dict[str, Any],
+        occurrence: int,
+        match_case: bool,
+        match_whole_word: bool,
+        match_wildcards: bool,
+        chunk_size: int,
+        interval_ms: int,
+    ) -> Dict[str, Any]:
+        document = self.get_or_create_file(app, "writer", create_if_missing=False)
+        target_range, matches_found = self.find_writer_range(
+            document,
+            anchor_text,
+            occurrence,
+            match_case,
+            match_whole_word,
+            match_wildcards,
+        )
+        anchor_bounds = self._range_bounds(target_range)
+        normalized_position = str(position or "after").strip().lower()
+        position_aliases = {
+            "after_text": "after",
+            "end": "after",
+            "append": "after",
+            "before_text": "before",
+            "start": "before",
+            "prepend": "before",
+            "replace_anchor": "replace",
+            "replace_text": "replace",
+        }
+        normalized_position = position_aliases.get(normalized_position, normalized_position)
+        if normalized_position not in {"after", "before", "replace"}:
+            raise ValueError("position must be after, before, or replace")
+
+        edit_range = self._duplicate_range(target_range)
+        if normalized_position == "after":
+            edit_range.Collapse(WD_COLLAPSE_END)
+        elif normalized_position == "before":
+            edit_range.Collapse(WD_COLLAPSE_START)
+
+        try:
+            edit_range.Select()
+        except Exception:
+            bounds = self._range_bounds(edit_range)
+            app.Selection.SetRange(bounds["start"], bounds["end"])
+
+        selection = app.Selection
+        self.apply_writer_style(selection, style)
+        text = str(text)
+        actual_chunk_size = chunk_size if chunk_size > 0 else len(text) or 1
+        delay = max(0, interval_ms) / 1000.0
+        chunks = 0
+        for start in range(0, len(text), actual_chunk_size):
+            selection.TypeText(text[start : start + actual_chunk_size])
+            chunks += 1
+            if delay and start + actual_chunk_size < len(text):
+                time.sleep(delay)
+
+        return {
+            "characters_written": len(text),
+            "chunks_written": chunks,
+            "position": normalized_position,
+            "anchor_text": str(anchor_text),
+            "occurrence": int(occurrence),
+            "matches_scanned": matches_found,
+            "anchor_start": anchor_bounds["start"],
+            "anchor_end": anchor_bounds["end"],
+        }
+
+    def read_writer_text(
+        self,
+        app: Any,
+        scope: str,
+        start_char: int,
+        max_chars: int,
+        normalize_line_endings: bool,
+    ) -> Dict[str, Any]:
+        document = self.get_or_create_file(app, "writer", create_if_missing=False)
+        normalized_scope = str(scope or "document").strip().lower()
+        scope_aliases = {
+            "all": "document",
+            "content": "document",
+            "body": "document",
+            "doc": "document",
+            "selected": "selection",
+            "current_selection": "selection",
+            "current": "selection",
+            "paragraph": "current_paragraph",
+            "current_para": "current_paragraph",
+            "current-paragraph": "current_paragraph",
+        }
+        normalized_scope = scope_aliases.get(normalized_scope, normalized_scope)
+        if normalized_scope not in {"document", "selection", "current_paragraph"}:
+            raise ValueError("scope must be document, selection, or current_paragraph")
+
+        if normalized_scope == "document":
+            source_range = document.Content
+        elif normalized_scope == "selection":
+            source_range = app.Selection.Range
+        else:
+            try:
+                source_range = app.Selection.Paragraphs.Item(1).Range
+            except Exception:
+                source_range = app.Selection.Range.Paragraphs.Item(1).Range
+
+        raw_text = str(getattr(source_range, "Text", "") or "")
+        text = _normalize_writer_text(raw_text) if normalize_line_endings else raw_text
+        total_chars = len(text)
+        start = max(0, int(start_char))
+        if start > total_chars:
+            start = total_chars
+
+        limit = int(max_chars)
+        if limit > 0:
+            end = min(total_chars, start + limit)
+        else:
+            end = total_chars
+        output_text = text[start:end]
+        has_more = end < total_chars
+
+        paragraph_count: Optional[int] = None
+        if normalized_scope == "document":
+            try:
+                paragraph_count = int(document.Paragraphs.Count)
+            except Exception:
+                paragraph_count = None
+
+        return {
+            "scope": normalized_scope,
+            "text": output_text,
+            "start_char": start,
+            "end_char": end,
+            "characters_returned": len(output_text),
+            "total_characters": total_chars,
+            "truncated": has_more,
+            "has_more": has_more,
+            "next_start_char": end if has_more else None,
+            "max_chars": limit,
+            "normalized_line_endings": bool(normalize_line_endings),
+            "paragraph_count": paragraph_count,
+            **self._range_bounds(source_range),
+        }
+
     def insert_writer_table(self, app: Any, data: List[List[Any]], rows: int, columns: int) -> Dict[str, Any]:
         document = self.get_or_create_file(app, "writer")
         selection = app.Selection
@@ -552,7 +831,10 @@ class WpsToolManager:
                 "Writer text, spreadsheet cells, and presentation slides update immediately."
             ),
             applications={
-                "writer": "Live writing, cursor/end/start insertion, styling, tables, save/open, arbitrary COM.",
+                "writer": (
+                    "Live reading, writing, cursor/end/start insertion, text-anchor find/insert, "
+                    "styling, tables, save/open, arbitrary COM."
+                ),
                 "spreadsheet": "Live range values/formulas, formatting through COM, sheets/charts/pivots through COM.",
                 "presentation": "Live slide creation, titles/body/notes, shapes/media/animations through COM.",
             },
@@ -561,6 +843,20 @@ class WpsToolManager:
                     "scene": "Continue writing in the document currently open in WPS",
                     "tool": "wps_handler_Wps_writer_write",
                     "arguments": {"text": "New paragraph", "mode": "end", "chunk_size": 20, "interval_ms": 30},
+                },
+                {
+                    "scene": "Read text pasted into the current WPS Writer document",
+                    "tool": "wps_handler_Wps_writer_read_text",
+                    "arguments": {"scope": "document", "start_char": 0, "max_chars": 12000},
+                },
+                {
+                    "scene": "Insert text after a paragraph already present in WPS Writer",
+                    "tool": "wps_handler_Wps_writer_insert_at_text",
+                    "arguments": {
+                        "anchor_text": "Project Risks",
+                        "text": "\nMitigation: add owners and due dates.",
+                        "position": "after",
+                    },
                 },
                 {
                     "scene": "Fill a live WPS spreadsheet",
@@ -687,6 +983,153 @@ class WpsToolManager:
         except Exception as exc:
             return _failure(exc)
 
+    def writer_read_text(
+        self,
+        scope: str = "document",
+        start_char: int = 0,
+        max_chars: int = 12000,
+        normalize_line_endings: bool = True,
+        create_if_missing: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Read text from the live WPS Writer document, selection, or current paragraph.
+
+        :param scope: document, selection, or current_paragraph.
+        :param start_char: Character offset for paged reads.
+        :param max_chars: Maximum characters to return; 0 returns all text.
+        :param normalize_line_endings: Convert WPS paragraph marks to "\n".
+        :param create_if_missing: Launch Writer when needed. Defaults to false.
+        :return: Text chunk and pagination metadata.
+        """
+        try:
+            with self._automation.com_scope():
+                app, normalized, attached = self._automation.connect(
+                    "writer", visible=True, create_if_missing=create_if_missing
+                )
+                self._automation.get_or_create_file(
+                    app, "writer", create_if_missing=create_if_missing
+                )
+                result = self._automation.read_writer_text(
+                    app,
+                    scope,
+                    int(start_char),
+                    int(max_chars),
+                    bool(normalize_line_endings),
+                )
+                return _success(
+                    "Text read from live WPS Writer",
+                    **result,
+                    context=self._automation.context_info(app, normalized, attached),
+                )
+        except Exception as exc:
+            return _failure(exc)
+
+    def writer_find_text(
+        self,
+        find_text: str,
+        occurrence: int = 1,
+        match_case: bool = False,
+        match_whole_word: bool = False,
+        match_wildcards: bool = False,
+        select_match: bool = True,
+        create_if_missing: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Find text in the live WPS Writer document and optionally select it.
+
+        :param find_text: Text anchor to search for.
+        :param occurrence: 1-based occurrence to find.
+        :param match_case: Match case exactly.
+        :param match_whole_word: Match whole words only.
+        :param match_wildcards: Use WPS/Word wildcard matching.
+        :param select_match: Select the found text in WPS when true.
+        :param create_if_missing: Launch Writer when needed. Defaults to false.
+        :return: Found range start/end information.
+        """
+        try:
+            with self._automation.com_scope():
+                app, normalized, attached = self._automation.connect(
+                    "writer", visible=True, create_if_missing=create_if_missing
+                )
+                self._automation.get_or_create_file(
+                    app, "writer", create_if_missing=create_if_missing
+                )
+                result = self._automation.find_writer_text(
+                    app,
+                    find_text,
+                    int(occurrence),
+                    bool(match_case),
+                    bool(match_whole_word),
+                    bool(match_wildcards),
+                    bool(select_match),
+                )
+                return _success(
+                    "Text found in live WPS Writer",
+                    **result,
+                    context=self._automation.context_info(app, normalized, attached),
+                )
+        except Exception as exc:
+            return _failure(exc)
+
+    def writer_insert_at_text(
+        self,
+        anchor_text: str,
+        text: str,
+        position: str = "after",
+        occurrence: int = 1,
+        style: Optional[Dict[str, Any]] = None,
+        match_case: bool = False,
+        match_whole_word: bool = False,
+        match_wildcards: bool = False,
+        chunk_size: int = 0,
+        interval_ms: int = 0,
+        create_if_missing: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Insert text before/after a text anchor in the live WPS Writer document.
+
+        :param anchor_text: Existing text used as the insertion anchor.
+        :param text: Text to insert.
+        :param position: after, before, or replace.
+        :param occurrence: 1-based occurrence of the anchor to use.
+        :param style: Optional style object, same shape as writer_write.
+        :param match_case: Match case exactly.
+        :param match_whole_word: Match whole words only.
+        :param match_wildcards: Use WPS/Word wildcard matching.
+        :param chunk_size: Characters written per visible chunk; 0 writes all text in one call.
+        :param interval_ms: Delay between chunks in milliseconds.
+        :param create_if_missing: Launch Writer when needed. Defaults to false.
+        :return: Insert result and anchor range information.
+        """
+        try:
+            with self._automation.com_scope():
+                app, normalized, attached = self._automation.connect(
+                    "writer", visible=True, create_if_missing=create_if_missing
+                )
+                self._automation.get_or_create_file(
+                    app, "writer", create_if_missing=create_if_missing
+                )
+                result = self._automation.insert_writer_text_at_anchor(
+                    app,
+                    anchor_text,
+                    text,
+                    position,
+                    style or {},
+                    int(occurrence),
+                    bool(match_case),
+                    bool(match_whole_word),
+                    bool(match_wildcards),
+                    max(0, int(chunk_size)),
+                    max(0, int(interval_ms)),
+                )
+                return _success(
+                    "Text inserted at WPS Writer anchor",
+                    **result,
+                    context=self._automation.context_info(app, normalized, attached),
+                )
+        except Exception as exc:
+            return _failure(exc)
+
     def writer_insert_table(
         self,
         data: Optional[List[List[Any]]] = None,
@@ -747,7 +1190,7 @@ class WpsToolManager:
                     1,
                     False,
                     replace_text,
-                    WD_REPLACE_ALL if replace_all else 1,
+                    WD_REPLACE_ALL if replace_all else WD_REPLACE_ONE,
                 )
                 return _success("Writer replacement completed", executed=bool(executed))
         except Exception as exc:
@@ -889,9 +1332,10 @@ class WpsToolManager:
         """
         Run a multi-step WPS scene described as ordered action dictionaries.
 
-        Writer actions: write, table, page_break. Spreadsheet actions: write.
-        Presentation actions: add_slide. All applications also support com and
-        save. This is useful when the agent wants one atomic scene-level call.
+        Writer actions: read_text, write, find_text, insert_at_text, table,
+        page_break. Spreadsheet actions: write. Presentation actions: add_slide.
+        All applications also support com and save. This is useful when the
+        agent wants one atomic scene-level call.
 
         :param app_type: writer, spreadsheet, or presentation.
         :param actions: Ordered action dictionaries; each requires an action field.
@@ -918,6 +1362,54 @@ class WpsToolManager:
                                 action.get("style", {}),
                                 int(action.get("chunk_size", 0)),
                                 int(action.get("interval_ms", 0)),
+                            )
+                        elif kind in {"read_text", "read"} and normalized == "writer":
+                            value = self._automation.read_writer_text(
+                                app,
+                                str(action.get("scope", "document")),
+                                int(action.get("start_char", 0)),
+                                int(action.get("max_chars", 12000)),
+                                bool(action.get("normalize_line_endings", True)),
+                            )
+                        elif kind in {"find_text", "find"} and normalized == "writer":
+                            value = self._automation.find_writer_text(
+                                app,
+                                str(action.get("find_text", action.get("anchor_text", ""))),
+                                int(action.get("occurrence", 1)),
+                                bool(action.get("match_case", False)),
+                                bool(action.get("match_whole_word", False)),
+                                bool(action.get("match_wildcards", False)),
+                                bool(action.get("select_match", True)),
+                            )
+                        elif (
+                            kind
+                            in {
+                                "insert_at_text",
+                                "insert_after_text",
+                                "insert_before_text",
+                                "replace_at_text",
+                            }
+                            and normalized == "writer"
+                        ):
+                            position = str(action.get("position", "after"))
+                            if kind == "insert_after_text":
+                                position = "after"
+                            elif kind == "insert_before_text":
+                                position = "before"
+                            elif kind == "replace_at_text":
+                                position = "replace"
+                            value = self._automation.insert_writer_text_at_anchor(
+                                app,
+                                str(action.get("anchor_text", action.get("find_text", ""))),
+                                str(action.get("text", "")),
+                                position,
+                                action.get("style", {}),
+                                int(action.get("occurrence", 1)),
+                                bool(action.get("match_case", False)),
+                                bool(action.get("match_whole_word", False)),
+                                bool(action.get("match_wildcards", False)),
+                                max(0, int(action.get("chunk_size", 0))),
+                                max(0, int(action.get("interval_ms", 0))),
                             )
                         elif kind == "table" and normalized == "writer":
                             value = self._automation.insert_writer_table(

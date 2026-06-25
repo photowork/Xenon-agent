@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import copy
+import inspect
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -18,7 +19,7 @@ def run_chat_turn(
     get_actual_context_status_fn: Callable[[], Dict[str, Any]],
     get_current_tool_names_fn: Callable[[], List[str]],
     get_available_tools_message_fn: Callable[..., str],
-    get_context_token_info_fn: Callable[[], str],
+    get_context_token_info_fn: Callable[..., str],
     inject_cognitive_network_summary_fn: Callable[..., None],
     get_recent_failures_fn: Callable[[], List[str]],
     get_current_tools_fn: Callable[[], List[Dict[str, Any]]],
@@ -39,10 +40,9 @@ def run_chat_turn(
 
     context_copy = copy.deepcopy(current_context)
     system_message = get_available_tools_message_fn(decision=decision)
-    system_message_with_token = system_message + get_context_token_info_fn()
 
     _replace_leading_system_messages(context_copy)
-    context_copy.insert(0, {"role": "system", "content": system_message_with_token})
+    context_copy.insert(0, {"role": "system", "content": system_message})
     inject_cognitive_network_summary_fn(
         context_copy,
         current_query=user_input,
@@ -50,10 +50,14 @@ def run_chat_turn(
         current_intent=decision.intent if decision else "",
         recent_failures=get_recent_failures_fn(),
     )
-    save_memory_log_fn("system", content=system_message_with_token)
 
     tools = get_current_tools_fn()
     ensure_context_size_fn(context_copy, tools)
+
+    token_info = _get_context_token_info(get_context_token_info_fn, context_copy, tools)
+    if token_info:
+        context_copy[0]["content"] = str(context_copy[0].get("content", "")) + token_info
+    save_memory_log_fn("system", content=context_copy[0].get("content", ""))
 
     context_committed = False
     try:
@@ -88,6 +92,35 @@ def _build_round_timestamp() -> Dict[str, Any]:
         "role": "system",
         "content": f"[本轮完成: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]",
     }
+
+
+def _get_context_token_info(
+    get_context_token_info_fn: Callable[..., str],
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+) -> str:
+    if _accepts_context_token_args(get_context_token_info_fn):
+        return get_context_token_info_fn(
+            messages=messages,
+            tools=tools,
+            system_message="",
+        )
+    return get_context_token_info_fn()
+
+
+def _accepts_context_token_args(get_context_token_info_fn: Callable[..., str]) -> bool:
+    try:
+        signature = inspect.signature(get_context_token_info_fn)
+    except (TypeError, ValueError):
+        return True
+
+    parameters = signature.parameters
+    if any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        return True
+    return {"messages", "tools", "system_message"}.issubset(parameters)
 
 
 def _replace_leading_system_messages(messages: List[Dict[str, Any]]) -> None:

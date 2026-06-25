@@ -791,6 +791,41 @@ async def get_session_usage(session_id: str):
 
         try:
             # 优先使用运行时已经算好的 token 信息（与状态栏同步）
+            inner = getattr(agent, "agent", None) or agent
+            live_status = getattr(inner, "_last_live_context_status", None)
+            if (
+                getattr(inner, "_turn_running", False)
+                and isinstance(live_status, dict)
+                and live_status.get("success")
+            ):
+                live_limit = int(
+                    live_status.get("configured_max_tokens")
+                    or live_status.get("max_tokens")
+                    or getattr(cm, "max_context_tokens", MAX_CONTEXT_TOKENS_DEFAULT)
+                    or MAX_CONTEXT_TOKENS_DEFAULT
+                )
+                live_tokens = int(live_status.get("tokens", 0) or 0)
+                live_ratio = getattr(cm, "cleanup_thresholds", {}).get("trigger", 0.8)
+                return {
+                    "context_tokens": live_tokens,
+                    "context_limit": live_limit,
+                    "percent": round(float(live_status.get("percentage", 0) or 0), 1),
+                    "level": live_status.get("level") or tc.get_token_usage_warning_level(live_tokens, live_limit),
+                    "msg_count": int(live_status.get("message_count", 0) or 0),
+                    "tool_count": int(live_status.get("tool_count", 0) or 0),
+                    "system_tokens": int(live_status.get("system_tokens", 0) or 0),
+                    "message_tokens": int(live_status.get("message_tokens", 0) or 0),
+                    "tool_tokens": int(live_status.get("tool_tokens", 0) or 0),
+                    "cleanup_trigger_tokens": int(live_status.get("cleanup_trigger_tokens", int(live_limit * live_ratio)) or 0),
+                    "cleanup_trigger_ratio": live_status.get("cleanup_trigger_ratio", live_ratio),
+                    "last_request_estimated_tokens": getattr(inner, "_last_request_estimated_tokens", None),
+                    "last_api_total_tokens": getattr(inner, "_last_api_total_tokens", None),
+                    "source": "live_request",
+                }
+
+            messages = getattr(inner, "current_context", getattr(agent, "current_context", []))
+            tools = []
+            system_msg = ""
             token_info_str = ""
             try:
                 # AsyncAIAgentWrapper 没有 _get_context_token_info，直接调用底层 agent
@@ -799,10 +834,10 @@ async def get_session_usage(session_id: str):
                 if get_info:
                     token_info_str = get_info()
             except Exception:
-                pass
+                token_info_str = ""
 
             # 始终先获取 messages（后续两个分支都需要）
-            messages = getattr(agent, "current_context", [])
+            messages = getattr(inner, "current_context", getattr(agent, "current_context", []))
             tools = []
             system_msg = ""
 
@@ -815,11 +850,11 @@ async def get_session_usage(session_id: str):
             else:
                 # 回退到手动计算（与运行时的 format_context_token_info 完全一致）
                 try:
-                    system_msg = agent._get_available_tools_message() or ""
+                    system_msg = inner._get_available_tools_message() or ""
                 except Exception:
                     pass
                 try:
-                    tools = agent._get_current_tools() or []
+                    tools = inner._get_current_tools() or []
                 except Exception:
                     pass
 
@@ -832,13 +867,13 @@ async def get_session_usage(session_id: str):
                     tokens += tc.count_tokens(tools_json)
                 # 加上认知网络摘要（API 提交时会注入）
                 try:
-                    cognitive = getattr(agent, "cognitive_network_summary", "")
+                    cognitive = getattr(inner, "cognitive_network_summary", "")
                     if cognitive:
                         tokens += tc.count_tokens(str(cognitive))
                 except Exception:
                     pass
 
-            limit = int(getattr(cm, "max_tokens_limit", MAX_CONTEXT_TOKENS_DEFAULT) or MAX_CONTEXT_TOKENS_DEFAULT)
+            limit = int(getattr(cm, "max_context_tokens", MAX_CONTEXT_TOKENS_DEFAULT) or MAX_CONTEXT_TOKENS_DEFAULT)
             if limit <= 0:
                 limit = MAX_CONTEXT_TOKENS_DEFAULT
 
@@ -850,6 +885,10 @@ async def get_session_usage(session_id: str):
                 "percent": percent,
                 "level": tc.get_token_usage_warning_level(tokens, limit),
                 "msg_count": len(messages),
+                "cleanup_trigger_tokens": int(limit * getattr(cm, "cleanup_thresholds", {}).get("trigger", 0.8)),
+                "cleanup_trigger_ratio": getattr(cm, "cleanup_thresholds", {}).get("trigger", 0.8),
+                "last_request_estimated_tokens": getattr(inner, "_last_request_estimated_tokens", None),
+                "last_api_total_tokens": getattr(inner, "_last_api_total_tokens", None),
                 "debug_system": bool(system_msg),
                 "debug_tools": len(tools),
             }

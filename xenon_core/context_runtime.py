@@ -15,10 +15,9 @@ MAX_CONTEXT_TOKENS_DEFAULT = 50000
 OUTPUT_TOKEN_RESERVE = 8000
 TIKTOKEN_AVAILABLE = tiktoken is not None
 
-# DeepSeek V3 tokenizer 路径（相对于项目根目录）
+# DeepSeek V3 tokenizer 路径（随 xenon_core 一起分发，避免依赖临时目录或固定盘符）
 _DEFAULT_DS_TOKENIZER_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "AI_code" / "token计算" / "deepseek_v3_tokenizer"
+    Path(__file__).resolve().parent
     / "deepseek_v3_tokenizer" / "tokenizer.json"
 )
 
@@ -393,32 +392,31 @@ def format_context_token_info(
     current_tools: List[Dict[str, Any]],
     context_manager: Any,
     logger: Any,
-    last_api_token_count: Optional[int] = None,
 ) -> str:
     if not context_manager or not getattr(context_manager, "token_counter", None):
         return ""
 
     try:
-        if last_api_token_count is not None and last_api_token_count > 0:
-            tokens = last_api_token_count
-        else:
-            tokens = 0
-            tokens += context_manager.token_counter.count_tokens(system_message)
-            tokens += context_manager.token_counter.estimate_messages_tokens(messages)
-            if current_tools:
-                tools_json = json.dumps(current_tools, ensure_ascii=False)
-                tokens += context_manager.token_counter.count_tokens(tools_json)
+        status = get_actual_context_status(
+            messages=messages,
+            system_message=system_message,
+            current_tools=current_tools,
+            context_manager=context_manager,
+        )
+        if not status.get("success"):
+            return ""
+
+        tokens = int(status.get("tokens", 0) or 0)
 
         if tokens <= 0:
             return ""
 
-        configured_max = _get_configured_max_tokens(context_manager)
-        output_reserve = int(getattr(context_manager, "output_token_reserve", 0) or 0)
-        trigger_ratio = getattr(context_manager, "cleanup_thresholds", {}).get("trigger", 0.8)
-        trigger_tokens = int(configured_max * trigger_ratio)
-
-        percentage = context_manager.token_counter.get_token_usage_percentage(tokens, configured_max)
-        level = context_manager.token_counter.get_token_usage_warning_level(tokens, configured_max)
+        configured_max = int(status.get("configured_max_tokens", 0) or 0)
+        output_reserve = int(status.get("output_token_reserve", 0) or 0)
+        trigger_ratio = float(status.get("cleanup_trigger_ratio", 0.8) or 0.8)
+        trigger_tokens = int(status.get("cleanup_trigger_tokens", 0) or 0)
+        percentage = status.get("percentage", 0)
+        level = status.get("level", "low")
         color_codes = {
             "low": "\033[38;2;111;208;104m",
             "medium": "\033[38;2;255;193;7m",
@@ -457,29 +455,60 @@ def format_context_token_info(
         return ""
 
 
+def _calculate_token_breakdown(
+    *,
+    messages: List[Dict[str, Any]],
+    system_message: str,
+    current_tools: List[Dict[str, Any]],
+    context_manager: Any,
+) -> Dict[str, int]:
+    token_counter = getattr(context_manager, "token_counter", None)
+    if token_counter is None:
+        return {
+            "system_tokens": 0,
+            "message_tokens": 0,
+            "tool_tokens": 0,
+            "total_tokens": 0,
+        }
+
+    system_tokens = token_counter.count_tokens(system_message) if system_message else 0
+    message_tokens = token_counter.estimate_messages_tokens(messages) if messages else 0
+    tool_tokens = 0
+    if current_tools:
+        tools_json = json.dumps(current_tools, ensure_ascii=False)
+        tool_tokens = token_counter.count_tokens(tools_json)
+
+    return {
+        "system_tokens": system_tokens,
+        "message_tokens": message_tokens,
+        "tool_tokens": tool_tokens,
+        "total_tokens": system_tokens + message_tokens + tool_tokens,
+    }
+
+
 def calculate_actual_tokens(
     *,
     messages: List[Dict[str, Any]],
+    system_message: str = "",
     current_tools: List[Dict[str, Any]],
     context_manager: Any,
 ) -> int:
     if not context_manager or not getattr(context_manager, "token_counter", None):
         return 0
 
-    total_tokens = 0
-    for message in messages:
-        total_tokens += context_manager.token_counter.estimate_messages_tokens([message])
-
-    if current_tools:
-        tools_json = json.dumps(current_tools, ensure_ascii=False)
-        total_tokens += context_manager.token_counter.count_tokens(tools_json)
-
-    return total_tokens
+    breakdown = _calculate_token_breakdown(
+        messages=messages,
+        system_message=system_message,
+        current_tools=current_tools,
+        context_manager=context_manager,
+    )
+    return int(breakdown["total_tokens"])
 
 
 def get_actual_context_status(
     *,
     messages: List[Dict[str, Any]],
+    system_message: str = "",
     current_tools: List[Dict[str, Any]],
     context_manager: Any,
 ) -> Dict[str, Any]:
@@ -491,11 +520,13 @@ def get_actual_context_status(
         }
 
     try:
-        tokens = calculate_actual_tokens(
+        breakdown = _calculate_token_breakdown(
             messages=messages,
+            system_message=system_message,
             current_tools=current_tools,
             context_manager=context_manager,
         )
+        tokens = int(breakdown["total_tokens"])
         configured_max = _get_configured_max_tokens(context_manager)
         output_reserve = int(getattr(context_manager, "output_token_reserve", 0) or 0)
         trigger_ratio = getattr(context_manager, "cleanup_thresholds", {}).get("trigger", 0.8)
@@ -513,6 +544,11 @@ def get_actual_context_status(
             "cleanup_trigger_ratio": trigger_ratio,
             "percentage": percentage,
             "level": level,
+            "message_count": len(messages),
+            "tool_count": len(current_tools),
+            "system_tokens": int(breakdown["system_tokens"]),
+            "message_tokens": int(breakdown["message_tokens"]),
+            "tool_tokens": int(breakdown["tool_tokens"]),
             "message": (
                 f"当前上下文使用 {tokens:,}/{configured_max:,} tokens ({percentage}%)，"
                 f"输出预留 {output_reserve:,}，"

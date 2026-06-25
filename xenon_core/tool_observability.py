@@ -5,8 +5,11 @@ import json
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
+from xenon_core.tool_payload_runtime import redact_base64_payloads
+
 
 def safe_stringify_result(value: Any, max_chars: int = 1500) -> str:
+    value = redact_base64_payloads(value)
     if isinstance(value, str):
         text = value
     else:

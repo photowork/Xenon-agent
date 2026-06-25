@@ -7,6 +7,12 @@ from xenon_core.turn_compactor import compact_history_for_next_context
 
 
 DEFAULT_RECENT_TURNS_AFTER_TRIM = 3
+TRIM_CONTINUATION_NOTE_PREFIX = "[SYSTEM NOTE] Automatic context trim completed."
+TRIM_CONTINUATION_NOTE = (
+    f"{TRIM_CONTINUATION_NOTE_PREFIX} Continue from the latest task checkpoint. "
+    "Do not repeat work listed as Completed; only advance Remaining, Current Focus, "
+    "or Latest User Request. If evidence was trimmed, inspect the minimum needed before acting."
+)
 
 
 def analyze_context_weight(
@@ -114,11 +120,21 @@ def auto_trim_context(
         max_tokens,
         len(messages),
     )
+    _save_checkpoint_before_trim(
+        messages=messages,
+        save_context_summary_fn=save_context_summary_fn,
+        logger=logger,
+    )
 
     keep_turns = _normalize_keep_turns(protected_conversation_rounds)
     removed_count = trim_messages_to_recent_context(
         messages,
         keep_recent_turns=keep_turns,
+    )
+    _inject_checkpoint_after_trim(
+        messages=messages,
+        inject_recent_memory_summary_fn=inject_recent_memory_summary_fn,
+        logger=logger,
     )
 
     after_tokens = context_manager.token_counter.estimate_total_tokens(messages, tools)
@@ -144,6 +160,59 @@ def auto_trim_context(
         len(messages),
         keep_turns,
     )
+
+
+def _save_checkpoint_before_trim(
+    *,
+    messages: List[Dict[str, Any]],
+    save_context_summary_fn: Callable[[List[Dict[str, Any]]], None],
+    logger: Any,
+) -> None:
+    try:
+        save_context_summary_fn(messages)
+        logger.info("Task checkpoint saved before context trim")
+    except Exception as error:
+        logger.warning("Failed to save task checkpoint before context trim: %s", error)
+
+
+def _inject_checkpoint_after_trim(
+    *,
+    messages: List[Dict[str, Any]],
+    inject_recent_memory_summary_fn: Callable[[List[Dict[str, Any]]], None],
+    logger: Any,
+) -> None:
+    try:
+        inject_recent_memory_summary_fn(messages)
+        _append_trim_continuation_note(messages)
+        _move_system_messages_to_front(messages)
+        logger.info("Task checkpoint injected after context trim")
+    except Exception as error:
+        logger.warning("Failed to inject task checkpoint after context trim: %s", error)
+
+
+def _append_trim_continuation_note(messages: List[Dict[str, Any]]) -> None:
+    messages[:] = [
+        message
+        for message in messages
+        if not (
+            message.get("role") == "system"
+            and str(message.get("content", "")).startswith(TRIM_CONTINUATION_NOTE_PREFIX)
+        )
+    ]
+    insert_pos = 0
+    while insert_pos < len(messages) and messages[insert_pos].get("role") == "system":
+        insert_pos += 1
+    messages.insert(insert_pos, {"role": "system", "content": TRIM_CONTINUATION_NOTE})
+
+
+def _move_system_messages_to_front(messages: List[Dict[str, Any]]) -> None:
+    system_messages = _dedupe_messages(
+        message for message in messages if message.get("role") == "system"
+    )
+    non_system_messages = [
+        message for message in messages if message.get("role") != "system"
+    ]
+    messages[:] = system_messages + non_system_messages
 
 
 def trim_messages_to_recent_context(

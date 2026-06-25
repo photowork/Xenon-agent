@@ -245,8 +245,27 @@ class FreeCADScene:
         return body
 
     def _placement(self, value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.strip().lower()
+            shortcuts = {
+                "xy": {"Base": [0, 0, 0], "yaw": 0, "pitch": 0, "roll": 0},
+                "xz": {"Base": [0, 0, 0], "yaw": 0, "pitch": 0, "roll": 0},
+                "yz": {"Base": [0, 0, 0], "yaw": 0, "pitch": 0, "roll": 0},
+            }
+            if value in shortcuts:
+                value = shortcuts[value]
+            else:
+                raise ValueError(
+                    f"placement string '{value}' is not recognized. "
+                    "Use a dictionary: {'Base': [x,y,z], 'axis': [ax,ay,az], 'angle': deg} "
+                    "or {'Base': [x,y,z], 'yaw': deg, 'pitch': deg, 'roll': deg}"
+                )
         if not isinstance(value, dict):
-            raise ValueError("placement must be a dictionary")
+            raise ValueError(
+                "placement must be a dictionary, e.g. "
+                "{'Base': [0,0,0], 'axis': [0,0,1], 'angle': 0} or "
+                "{'Base': [0,0,0], 'yaw': 0, 'pitch': 0, 'roll': 0}"
+            )
         base = _vector(self.App, value.get("position") or value.get("base"), [0, 0, 0])
         if "axis" in value or "angle" in value:
             rotation = self.App.Rotation(
@@ -415,6 +434,17 @@ class FreeCADScene:
             return self.Part.Face(self.Part.Wire(shape.Edges))
         return shape
 
+    def _wire_from_object(self, object_id: Any, context_op: str) -> Any:
+        """Extract a single wire from a sketch/profile object for loft/sweep."""
+        shape = self._shape(object_id)
+        if shape.ShapeType == "Wire":
+            return shape
+        if getattr(shape, "Wires", None):
+            return shape.Wires[0]
+        if shape.Edges:
+            return self.Part.Wire(shape.Edges)
+        raise ValueError(f"{context_op} profile '{object_id}' must contain a wire or edges")
+
     def _create_sketch(self, action: Dict[str, Any]) -> Any:
         import Sketcher
 
@@ -425,15 +455,40 @@ class FreeCADScene:
         body_id = action.get("body")
         if body_id:
             self._body(body_id).addObject(sketch)
-        support = str(action.get("support") or "").strip().lower()
+        support = action.get("support")
         support_planes = {
             "xy": "XY_Plane",
             "xz": "XZ_Plane",
             "yz": "YZ_Plane",
         }
-        if support in support_planes:
-            sketch.AttachmentSupport = (getattr(self.doc, support_planes[support]), [""])
-            sketch.MapMode = "FlatFace"
+        support_key = None
+        if support is not None:
+            if isinstance(support, str):
+                support_key = support.strip().lower()
+                if support_key in support_planes:
+                    sketch.AttachmentSupport = (getattr(self.doc, support_planes[support_key]), [""])
+                    sketch.MapMode = "FlatFace"
+                else:
+                    # Treat as object ID (e.g. a datum plane)
+                    ref_obj = self._require_object(support)
+                    sketch.AttachmentSupport = (ref_obj, [""])
+                    sketch.MapMode = "FlatFace"
+            elif isinstance(support, dict):
+                ref_obj = self._require_object(support.get("object"))
+                subs = list(support.get("subelements") or [])
+                sketch.AttachmentSupport = (ref_obj, subs)
+                sketch.MapMode = str(support.get("map_mode", "FlatFace"))
+        if action.get("offset") is not None:
+            offset = action["offset"]
+            if isinstance(offset, (list, tuple)):
+                # Transform global offset to attachment local CS for named planes
+                # XZ plane normal = -global Y, YZ plane normal = +global X
+                if support_key == "xz":
+                    offset = [offset[0], offset[2], -offset[1]]
+                elif support_key == "yz":
+                    offset = [offset[2], offset[1], offset[0]]
+                offset = {"position": offset}
+            sketch.AttachmentOffset = self._placement(offset)
         if action.get("placement"):
             sketch.Placement = self._placement(action["placement"])
         for geometry in action.get("geometry", []):
@@ -462,6 +517,71 @@ class FreeCADScene:
                     ),
                     bool(geometry.get("construction", False)),
                 )
+            elif kind in {"bspline", "bezier"}:
+                poles = geometry.get("poles")
+                if not isinstance(poles, list) or len(poles) < 2:
+                    raise ValueError(f"Sketch geometry '{kind}' requires at least 2 poles")
+                pole_vectors = [_vector(self.App, p) for p in poles]
+                if kind == "bspline":
+                    curve = self.Part.BSplineCurve()
+                    degree = int(geometry.get("degree", 3))
+                    curve.interpolate(pole_vectors)
+                    try:
+                        curve.setDegree(min(degree, len(pole_vectors) - 1))
+                    except Exception:
+                        pass
+                else:
+                    curve = self.Part.BezierCurve()
+                    curve.setPoles(pole_vectors)
+                    degree = int(geometry.get("degree", len(pole_vectors) - 1))
+                    if degree != len(pole_vectors) - 1:
+                        try:
+                            curve.setDegree(degree)
+                        except Exception:
+                            pass
+                sketch.addGeometry(curve, bool(geometry.get("construction", False)))
+            elif kind == "rectangle":
+                x = float(geometry.get("x", 0))
+                y = float(geometry.get("y", 0))
+                z = float(geometry.get("z", 0))
+                w = float(geometry.get("width", 10))
+                h = float(geometry.get("height", 10))
+                corners = [
+                    [x, y, z],
+                    [x + w, y, z],
+                    [x + w, y + h, z],
+                    [x, y + h, z],
+                ]
+                is_construction = bool(geometry.get("construction", False))
+                for i in range(4):
+                    sketch.addGeometry(
+                        self.Part.LineSegment(
+                            _vector(self.App, corners[i]),
+                            _vector(self.App, corners[(i + 1) % 4]),
+                        ),
+                        is_construction,
+                    )
+            elif kind == "polyline":
+                points = geometry.get("points")
+                if not isinstance(points, list) or len(points) < 2:
+                    raise ValueError("Sketch geometry 'polyline' requires at least 2 points")
+                is_construction = bool(geometry.get("construction", False))
+                for i in range(len(points) - 1):
+                    sketch.addGeometry(
+                        self.Part.LineSegment(
+                            _vector(self.App, points[i]),
+                            _vector(self.App, points[i + 1]),
+                        ),
+                        is_construction,
+                    )
+                if geometry.get("closed", False):
+                    sketch.addGeometry(
+                        self.Part.LineSegment(
+                            _vector(self.App, points[-1]),
+                            _vector(self.App, points[0]),
+                        ),
+                        is_construction,
+                    )
             else:
                 raise ValueError(f"Unsupported sketch geometry type '{kind}'")
         if sketch.GeometryCount == 0:
@@ -504,18 +624,154 @@ class FreeCADScene:
         feature.Length = float(action.get("length", 10))
         if "reversed" in action:
             feature.Reversed = bool(action["reversed"])
-        elif type_id == "PartDesign::Pocket":
-            # A sketch on the body's base plane normally cuts opposite to a
-            # positive-Z pad. Callers can explicitly override this direction.
-            feature.Reversed = True
         if "midplane" in action:
             feature.Midplane = bool(action["midplane"])
         if "type" in action:
-            feature.Type = int(action["type"])
+            type_val = action["type"]
+            if isinstance(type_val, str):
+                type_map = {
+                    "length": "Length",
+                    "throughAll": "ThroughAll",
+                    "throughFirst": "ThroughFirst",
+                    "upToFace": "UpToFace",
+                    "twoLengths": "TwoLengths",
+                }
+                feature.Type = type_map.get(str(type_val).strip(), "Length")
+            else:
+                feature.Type = int(type_val)
         if "length2" in action and "Length2" in feature.PropertiesList:
             feature.Length2 = float(action["length2"])
         self.doc.recompute()
         self._set_visibility([profile.Name], False)
+        return self._register_object(feature, action)
+
+    def _part_design_groove(self, action: Dict[str, Any]) -> Any:
+        """PartDesign Groove: revolve a profile and subtract it from the body."""
+        object_id = str(action.get("id") or "").strip()
+        body = self._body(action.get("body"))
+        profile = self._require_object(action.get("profile"))
+        feature = self.doc.addObject("PartDesign::Groove", object_id)
+        body.addObject(feature)
+        feature.Profile = profile
+        feature.ReferenceAxis = self._axis_reference(action, "axis", "z")
+        feature.Angle = float(action.get("angle", 360))
+        if "reversed" in action:
+            feature.Reversed = bool(action["reversed"])
+        if "midplane" in action:
+            feature.Midplane = bool(action["midplane"])
+        if "type" in action:
+            type_val = action["type"]
+            if isinstance(type_val, str):
+                type_map = {
+                    "length": "Length",
+                    "throughAll": "ThroughAll",
+                    "throughFirst": "ThroughFirst",
+                    "upToFace": "UpToFace",
+                    "twoLengths": "TwoLengths",
+                }
+                feature.Type = type_map.get(str(type_val).strip(), "Length")
+            else:
+                feature.Type = int(type_val)
+        self.doc.recompute()
+        self._set_visibility([profile.Name], False)
+        return self._register_object(feature, action)
+
+    def _part_design_hole(self, action: Dict[str, Any]) -> Any:
+        """PartDesign Hole: standard hole feature (through/blind/counterbore/countersink).
+
+        Maps the tool's user-facing hole_type/thread_type/drill_point enums to
+        FreeCAD 1.x's string-valued Hole enumerations (DepthType, HoleCutType,
+        ThreadType, DrillPoint). Verified against FreeCAD 1.1.
+        """
+        object_id = str(action.get("id") or "").strip()
+        body = self._body(action.get("body"))
+        profile = self._require_object(action.get("profile"))
+        feature = self.doc.addObject("PartDesign::Hole", object_id)
+        body.addObject(feature)
+        feature.Profile = profile
+
+        hole_type = str(action.get("hole_type", "blind")).strip().lower()
+        depth_map = {"through": "ThroughAll", "blind": "Dimension"}
+        cut_map = {"counterbore": "Counterbore", "countersink": "Countersink"}
+        if hole_type in depth_map:
+            feature.DepthType = depth_map[hole_type]
+            feature.HoleCutType = "None"
+        elif hole_type in cut_map:
+            feature.DepthType = "Dimension"
+            feature.HoleCutType = cut_map[hole_type]
+        else:
+            raise ValueError(
+                f"hole_type must be through/blind/counterbore/countersink, got '{hole_type}'"
+            )
+
+        thread_type = str(action.get("thread_type", "none")).strip().lower()
+        thread_map = {
+            "none": "None",
+            "metric": "ISOMetricProfile",
+            "metric_fine": "ISOMetricFineProfile",
+        }
+        if thread_type not in thread_map:
+            raise ValueError(f"thread_type must be none/metric/metric_fine, got '{thread_type}'")
+        feature.ThreadType = thread_map[thread_type]
+        if thread_type != "none":
+            feature.Threaded = True
+
+        if "diameter" in action:
+            feature.Diameter = float(action["diameter"])
+        if "depth" in action:
+            feature.Depth = float(action["depth"])
+        if "thread_depth" in action:
+            feature.ThreadDepth = float(action["thread_depth"])
+        if "drill_point" in action:
+            # FreeCAD 1.x DrillPoint only has Flat/Angled (no Sphere).
+            drill_map = {"flat": "Flat", "angled": "Angled", "sphere": "Angled"}
+            drill = str(action["drill_point"]).strip().lower()
+            if drill in drill_map:
+                feature.DrillPoint = drill_map[drill]
+        if "reversed" in action:
+            feature.Reversed = bool(action["reversed"])
+        if "tapered" in action:
+            feature.Tapered = bool(action["tapered"])
+        if "model_thread" in action and "ModelThread" in feature.PropertiesList:
+            feature.ModelThread = bool(action["model_thread"])
+
+        self.doc.recompute()
+        self._set_visibility([profile.Name], False)
+        return self._register_object(feature, action)
+
+    def _part_design_pipe(self, action: Dict[str, Any]) -> Any:
+        """PartDesign Pipe: parametric sweep along a path wire."""
+        object_id = str(action.get("id") or "").strip()
+        body = self._body(action.get("body"))
+        path = self._require_object(action.get("path"))
+        feature = self.doc.addObject("PartDesign::Pipe", object_id)
+        body.addObject(feature)
+        feature.Spine = path
+
+        profile_ids = []
+        if action.get("profiles"):
+            profile_ids = list(action["profiles"])
+        elif action.get("profile"):
+            profile_ids = [action["profile"]]
+        if profile_ids:
+            feature.Profile = self._require_object(profile_ids[0])
+            if len(profile_ids) > 1 and "AuxiliarySpine" in feature.PropertiesList:
+                feature.AuxiliarySpine = self._require_object(profile_ids[1])
+
+        transition = str(action.get("transition", "transformed")).strip().lower()
+        # FreeCAD 1.x Transition enum: Transformed / Right corner / Round corner
+        transition_map = {
+            "transformed": "Transformed",
+            "linear": "Right corner",
+            "frenet": "Round corner",
+        }
+        if transition in transition_map and "Transition" in feature.PropertiesList:
+            feature.Transition = transition_map[transition]
+
+        self.doc.recompute()
+        self._set_visibility([path.Name], False)
+        if profile_ids and not action.get("keep_source", False):
+            self._set_visibility(profile_ids, False)
         return self._register_object(feature, action)
 
     def _combine_copies(self, copies: List[Any], fuse: bool) -> Any:
@@ -676,10 +932,100 @@ class FreeCADScene:
             wire = Part.makePolygon(vectors)
             shape = Part.Face(wire) if action.get("face", False) and closed else wire
             obj = self._add_shape(object_id, shape, action)
+        elif op in {"bspline", "bezier"}:
+            poles = action["poles"]
+            pole_vectors = [_vector(App, p) for p in poles]
+            if op == "bspline":
+                curve = Part.BSplineCurve()
+                degree = int(action.get("degree", 3))
+                curve.interpolate(pole_vectors)
+                try:
+                    curve.setDegree(min(degree, len(pole_vectors) - 1))
+                except Exception:
+                    pass
+                if action.get("knots"):
+                    try:
+                        curve.setKnots([float(k) for k in action["knots"]])
+                    except Exception:
+                        pass
+                if action.get("weights"):
+                    try:
+                        curve.setWeights([float(w) for w in action["weights"]])
+                    except Exception:
+                        pass
+            else:
+                curve = Part.BezierCurve()
+                curve.setPoles(pole_vectors)
+            shape = curve.toShape()
+            if action.get("face", False):
+                try:
+                    shape = Part.Face(Part.Wire(shape))
+                except Exception:
+                    pass
+            obj = self._add_shape(object_id, shape, action)
         elif op == "create_sketch":
             obj = self._create_sketch(action)
         elif op == "create_body":
             obj = self._register_object(self.doc.addObject("PartDesign::Body", object_id), action)
+        elif op in {"create_datum_plane", "create_datum_axis", "create_datum_point"}:
+            datum_type = {
+                "create_datum_plane": ("PartDesign::Plane", "Plane"),
+                "create_datum_axis": ("PartDesign::Line", "Line"),
+                "create_datum_point": ("PartDesign::Point", "Point"),
+            }[op]
+            datum = self.doc.addObject(datum_type[0], object_id)
+            body_id = action.get("body")
+            if body_id:
+                self._body(body_id).addObject(datum)
+            attachment = action.get("attachment")
+            if attachment is not None:
+                if isinstance(attachment, str):
+                    axis_map = {"x": "X_Axis", "y": "Y_Axis", "z": "Z_Axis"}
+                    plane_map = {"xy": "XY_Plane", "xz": "XZ_Plane", "yz": "YZ_Plane"}
+                    key = attachment.strip().lower()
+                    if op == "create_datum_plane" and key in plane_map:
+                        datum.AttachmentSupport = (getattr(self.doc, plane_map[key]), [""])
+                        datum.MapMode = "FlatFace"
+                    elif op == "create_datum_axis" and key in axis_map:
+                        datum.AttachmentSupport = (getattr(self.doc, axis_map[key]), [""])
+                        datum.MapMode = "AxisOfCurves"
+                    elif op == "create_datum_point" and key in axis_map:
+                        datum.AttachmentSupport = (getattr(self.doc, axis_map[key]), [""])
+                        datum.MapMode = "PointOfVertices"
+                    else:
+                        raise ValueError(f"{op} attachment '{attachment}' is not recognized")
+                elif isinstance(attachment, dict):
+                    ref_obj = self._require_object(attachment.get("object"))
+                    subs = list(attachment.get("subelements") or [])
+                    datum.AttachmentSupport = (ref_obj, subs)
+                    datum.MapMode = str(attachment.get("map_mode", "Deactivated"))
+            if action.get("placement"):
+                datum.Placement = self._placement(action["placement"])
+            if "offset" in action:
+                offset = action["offset"]
+                # Transform global offset to attachment local CS for named planes
+                if isinstance(offset, (list, tuple)) and isinstance(attachment, str):
+                    plane_key = attachment.strip().lower()
+                    if op == "create_datum_plane":
+                        # XY plane: local CS = global CS (identity)
+                        # XZ plane: local X=global X, local Y=global Z, local Z=global Y
+                        # YZ plane: local X=global Z, local Y=global Y, local Z=global X
+                        if plane_key == "xz":
+                            offset = [offset[0], offset[2], -offset[1]]
+                        elif plane_key == "yz":
+                            offset = [offset[2], offset[1], offset[0]]
+                    elif op == "create_datum_axis":
+                        if plane_key == "x":
+                            offset = [offset[0], offset[2], offset[1]]
+                        elif plane_key == "y":
+                            offset = [offset[2], offset[1], offset[0]]
+                datum.AttachmentOffset = self._placement(
+                    {"position": offset} if isinstance(offset, (list, tuple)) else offset
+                )
+            if op == "create_datum_point" and "position" in action:
+                datum.AttachmentOffset = self.App.Placement(_vector(App, action["position"]), self.App.Rotation())
+            self.doc.recompute()
+            obj = self._register_object(datum, action)
         elif op == "pad":
             obj = self._part_design_feature(action, "PartDesign::Pad")
         elif op == "pocket":
@@ -872,7 +1218,17 @@ class FreeCADScene:
             page.addView(view)
             view.Source = [self._require_object(item) for item in sources if item]
             if "direction" in action:
-                view.Direction = _vector(App, action["direction"])
+                direction = action["direction"]
+                if isinstance(direction, str):
+                    dir_map = {
+                        "x": [1, 0, 0], "y": [0, 1, 0], "z": [0, 0, 1],
+                        "top": [0, 0, 1], "bottom": [0, 0, -1],
+                        "front": [0, -1, 0], "rear": [0, 1, 0],
+                        "left": [-1, 0, 0], "right": [1, 0, 0],
+                    }
+                    view.Direction = _vector(App, dir_map.get(direction.strip().lower(), [0, 0, 1]))
+                else:
+                    view.Direction = _vector(App, direction)
             for name in ("X", "Y", "Scale", "Rotation"):
                 if name.lower() in action:
                     setattr(view, name, float(action[name.lower()]))
@@ -895,6 +1251,59 @@ class FreeCADScene:
                 dimension.OverTolerance = float(action.get("over_tolerance", 0))
                 dimension.UnderTolerance = float(action.get("under_tolerance", 0))
             obj = self._register_object(dimension, action)
+        elif op == "techdraw_section_view":
+            page = self._require_object(action.get("page"))
+            sources = action.get("sources") or [action.get("source")]
+            section = self.doc.addObject("TechDraw::DrawViewSection", object_id)
+            page.addView(section)
+            section.Source = [self._require_object(item) for item in sources if item]
+            section_dir = action.get("section_direction", "z")
+            if isinstance(section_dir, str):
+                dir_map = {"x": [1,0,0], "y": [0,1,0], "z": [0,0,1]}
+                section.Direction = _vector(App, dir_map.get(section_dir.strip().lower(), [0,0,1]))
+            else:
+                section.Direction = _vector(App, section_dir)
+            if action.get("section_normal"):
+                section.SectionNormal = _vector(App, action["section_normal"])
+            if action.get("section_origin"):
+                section.SectionOrigin = _vector(App, action["section_origin"])
+            if "scale" in action:
+                section.Scale = float(action["scale"])
+            for name in ("X", "Y"):
+                if name.lower() in action:
+                    setattr(section, name, float(action[name.lower()]))
+            if action.get("label"):
+                section.Label = str(action["label"])
+            obj = self._register_object(section, action)
+        elif op == "techdraw_annotation":
+            page = self._require_object(action.get("page"))
+            annotation = self.doc.addObject("TechDraw::DrawViewAnnotation", object_id)
+            page.addView(annotation)
+            annotation.Text = [str(action["text"])]
+            for name in ("X", "Y"):
+                if name.lower() in action:
+                    setattr(annotation, name, float(action[name.lower()]))
+            if "font_size" in action and "TextSize" in annotation.PropertiesList:
+                annotation.TextSize = float(action["font_size"])
+            obj = self._register_object(annotation, action)
+        elif op == "techdraw_balloon":
+            page = self._require_object(action.get("page"))
+            view = self._require_object(action.get("view"))
+            balloon = self.doc.addObject("TechDraw::DrawViewBalloon", object_id)
+            page.addView(balloon)
+            balloon.SourceView = view
+            balloon.Text = str(action["text"])
+            if "x" in action:
+                balloon.X = float(action["x"])
+            if "y" in action:
+                balloon.Y = float(action["y"])
+            if "origin_x" in action and "OriginX" in balloon.PropertiesList:
+                balloon.OriginX = float(action["origin_x"])
+            if "origin_y" in action and "OriginY" in balloon.PropertiesList:
+                balloon.OriginY = float(action["origin_y"])
+            # Note: DrawViewBalloon has no font size property in FreeCAD 1.x
+            # (only TextWrapLen); font_size is silently ignored.
+            obj = self._register_object(balloon, action)
         elif op in {"fuse", "cut", "common"}:
             base_id = action.get("base")
             base = self._shape(base_id)
@@ -948,6 +1357,56 @@ class FreeCADScene:
             obj = self._add_shape(object_id, shape, action)
             if not action.get("keep_source", False):
                 self._set_visibility([source_id], False)
+        elif op == "groove":
+            obj = self._part_design_groove(action)
+        elif op == "hole":
+            obj = self._part_design_hole(action)
+        elif op == "partdesign_pipe":
+            obj = self._part_design_pipe(action)
+        elif op == "loft":
+            source_ids = list(action.get("profiles") or [])
+            if len(source_ids) < 2:
+                raise ValueError("loft requires at least 2 profiles")
+            wires = [self._wire_from_object(sid, "loft") for sid in source_ids]
+            ruled = bool(action.get("ruled", False))
+            closed = bool(action.get("closed", False))
+            try:
+                shape = self.Part.makeLoft(wires, ruled, closed)
+            except Exception as exc:
+                raise ValueError(
+                    f"loft failed for profiles {source_ids}. "
+                    f"Ensure profiles are non-self-intersecting and ordered consistently. "
+                    f"FreeCAD reported: {exc}"
+                ) from exc
+            if shape is None or shape.isNull() or not shape.isValid():
+                raise ValueError("loft produced an invalid shape. Check profile ordering and continuity.")
+            obj = self._add_shape(object_id, shape, action)
+            if not action.get("keep_profiles", False):
+                self._set_visibility(source_ids, False)
+        elif op == "sweep":
+            path_id = action.get("path")
+            if not path_id:
+                raise ValueError("sweep requires a path")
+            profile_ids = [pid for pid in (action.get("profiles") or [action.get("profile")]) if pid]
+            if not profile_ids:
+                raise ValueError("sweep requires at least one profile")
+            path_wire = self._wire_from_object(path_id, "sweep path")
+            profile_wires = [self._wire_from_object(pid, "sweep") for pid in profile_ids]
+            make_solid = bool(action.get("make_solid", True))
+            is_frenet = bool(action.get("frenet", True))
+            try:
+                shape = path_wire.makePipeShell(profile_wires, make_solid, is_frenet)
+            except Exception as exc:
+                raise ValueError(
+                    f"sweep failed for path '{path_id}' with profiles {profile_ids}. "
+                    f"Ensure the path is a single continuous wire and profiles are planar. "
+                    f"FreeCAD reported: {exc}"
+                ) from exc
+            if shape is None or shape.isNull() or not shape.isValid():
+                raise ValueError("sweep produced an invalid shape. Check path continuity and profile orientation.")
+            obj = self._add_shape(object_id, shape, action)
+            if not action.get("keep_source", False):
+                self._set_visibility([path_id, *profile_ids], False)
         elif op in {"copy", "move", "rotate"}:
             source_id = action.get("source")
             shape = self._shape(source_id).copy()
@@ -974,6 +1433,77 @@ class FreeCADScene:
             obj = self._add_shape(object_id, result, action)
             if not action.get("keep_source", False):
                 self._set_visibility([source_id], False)
+        elif op == "shape_string":
+            import Draft
+            ss = Draft.make_shapestring(
+                str(action["string"]),
+                str(action["font_path"]),
+                float(action.get("size", 10)),
+            )
+            ss.Label = str(action.get("label") or object_id)
+            extrude = float(action.get("extrude", 0))
+            if extrude > 0:
+                import Part
+                wire = ss.Shape.Wires[0] if ss.Shape.Wires else ss.Shape
+                shape = wire.extrude(App.Vector(0, 0, extrude))
+                solid_obj = self.doc.addObject("Part::Feature", object_id)
+                solid_obj.Label = ss.Label
+                solid_obj.Shape = shape
+                self.doc.removeObject(ss.Name)
+                self._apply_view_options(solid_obj, action)
+                obj = self._register_object(solid_obj, action)
+            else:
+                ss.Name = object_id if not self.doc.getObject(object_id) else ss.Name
+                obj = self._register_object(ss, action)
+            if action.get("placement"):
+                obj.Placement = self._placement(action["placement"])
+            elif action.get("position"):
+                obj.Placement = App.Placement(_vector(App, action["position"]), App.Rotation())
+        elif op == "draft_array":
+            import Draft
+            source = self._require_object(action.get("source"))
+            array_type = str(action.get("array_type", "orthogonal")).strip().lower()
+            if array_type == "orthogonal":
+                count_x = int(action.get("count_x", 2))
+                count_y = int(action.get("count_y", 1))
+                count_z = int(action.get("count_z", 1))
+                interval_x = _vector(App, action.get("interval_x"), [10, 0, 0])
+                interval_y = _vector(App, action.get("interval_y"), [0, 10, 0])
+                interval_z = _vector(App, action.get("interval_z"), [0, 0, 10])
+                arr = Draft.make_array(source, interval_x, interval_y, interval_z, count_x, count_y, count_z)
+            elif array_type == "polar":
+                count = int(action.get("count", 4))
+                angle = float(action.get("angle", 360))
+                center = _vector(App, action.get("axis"), [0, 0, 0]) if "axis" in action else _vector(App, action.get("center"), [0, 0, 0])
+                arr = Draft.make_array(source, center, angle, count, use_link=True)
+            else:
+                raise ValueError(f"draft_array array_type '{array_type}' not supported (use orthogonal/polar)")
+            arr.Label = str(action.get("label") or object_id)
+            obj = self._register_object(arr, action)
+        elif op == "draft_clone":
+            import Draft
+            source = self._require_object(action.get("source"))
+            clone = Draft.make_clone(source)
+            clone.Label = str(action.get("label") or object_id)
+            if action.get("placement"):
+                clone.Placement = self._placement(action["placement"])
+            obj = self._register_object(clone, action)
+        elif op == "import_dxf":
+            import Draft
+            dxf_path = self._automation.resolve_path(action["file_path"], must_exist=True) if hasattr(self, "_automation") else Path(str(action["file_path"])).resolve()
+            if not dxf_path.is_file():
+                raise FileNotFoundError(f"DXF file not found: {dxf_path}")
+            layer_filter = action.get("layer_filter")
+            if layer_filter and isinstance(layer_filter, list):
+                Draft.dxf_import(str(dxf_path), layername=layer_filter)
+            else:
+                Draft.dxf_import(str(dxf_path))
+            imported = [o for o in self.doc.Objects if o not in self.objects.values()][-1:]
+            if imported:
+                imported[0].Label = str(action.get("label") or object_id)
+                obj = self._register_object(imported[0], action)
+            else:
+                raise ValueError("DXF import produced no objects")
         elif op == "remove":
             target = self._require_object(action.get("object"))
             removed_name = target.Name
