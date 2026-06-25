@@ -1,8 +1,8 @@
 # Xenon Agent
 
-> 基于递归对话与动态工具编排的 AI 智能体系统。集成代码编辑、网络搜索、语音交互、视觉识别、文档处理、3D 建模、因果推理、计算引擎等 20+ 工具模块，配备完整的 WebUI、多智能体协作与自主运行框架。
+> 基于递归对话与动态工具编排的 AI 智能体系统。集成代码编辑、网络搜索、语音交互、视觉识别、文档处理、3D 建模、因果推理、计算引擎等 30+ 工具模块，配备完整的 WebUI、多智能体协作与自主运行框架。
 >
-> An AI agent system based on recursive dialogue and dynamic tool orchestration, featuring 20+ tool modules including code editor, web search, speech, vision, document processing, 3D modeling, causal reasoning, and a computational engine, with a complete WebUI, multi-agent collaboration, and autonomous runtime framework.
+> An AI agent system based on recursive dialogue and dynamic tool orchestration, featuring 30+ tool modules including code editor, web search, speech, vision, document processing, 3D modeling, causal reasoning, computational engine, knowledge graph, and more, with a complete WebUI, multi-agent collaboration, and autonomous runtime framework.
 
 ![Xenon 运行界面](assets/screenshots/xenon.jpg)
 
@@ -10,7 +10,7 @@
 
 - **🧠 递归对话架构** — 对话轮次管理、上下文裁剪与压缩、记忆持久化、认知网络
 - **🛠️ 动态工具编排** — 按需加载工具模块，每轮对话自动注册/卸载，含工具路由、调度、执行监控
-- **🌐 完整 WebUI** — 浏览器端交互界面，支持流式 SSE 响应、会话管理、工具调用可视化
+- **🌐 完整 WebUI** — 浏览器端交互界面，支持流式 SSE 响应、会话管理、工具调用可视化与折叠
 - **📝 代码编辑** — 文件导航、精准定位、安全写入与回退、代码搜索
 - **🔍 网络搜索** — 实时网页搜索与内容抓取
 - **👁️ 视觉识别** — 图像分析与 OCR 文字提取（多 API 后端）
@@ -26,6 +26,11 @@
 - **🔄 任务编排** — 可编程任务链，支持步骤依赖与条件分支
 - **📚 技能系统** — 可沉淀经验的技能文档管理与自动加载
 - **🚀 自主运行** — 意图识别、自主规划、执行与修复循环
+- **🧠 灵魂引擎** — 自我模型管理、递归内省、身份认知与状态感知
+- **🔗 知识图谱** — 知识图谱构建、查询与关联推理
+- **🔬 逻辑验证** — 形式逻辑证明、命题验证与推理校验
+- **🔄 仿真验证** — 仿真建模、参数扫描与结果验证
+- **📑 OCR 识别** — 图片文字识别与提取（本地运行）
 
 ## 快速开始
 
@@ -80,122 +85,38 @@ python launcher.py
 python Xenon.py
 ```
 
-**方式三：一键脚本**
+**方式三：macOS / Linux 一键启动**
+
+把下面整段复制到终端，一条命令完成 venv 创建 → 依赖安装 → 启动：
+
+```bash
+# 首次运行（含环境初始化）
+python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python launcher.py
+```
+
+已经装过依赖后，直接用：
+
+```bash
+# 已有 venv，快速启动
+source venv/bin/activate && python launcher.py
+```
+
+如果需要通过环境变量传 API Key：
+
+```bash
+export DEEPSEEK_API_KEY="你的密钥" && source venv/bin/activate && python launcher.py
+```
+
+**方式四：一键脚本**
 
 ```bash
 # Windows
-start_Xenon.bat     # 命令行模式
+start_Xenon.bat     # 启动器模式（launcher.py，图形界面选择启动方式）
 start_webui.bat     # WebUI 模式
 
-# Linux/macOS
-sh start_webui.sh
-```
-
-## 项目结构
-
-```
-Xenon-agent/
-├── Xenon.py                        # 主程序入口
-├── launcher.py                     # WebUI 启动器
-├── deepseekconfig.py               # API 配置
-├── requirements.txt                # Python 依赖
-├── .gitignore                      # Git 忽略规则
-├── LICENSE                         # MIT 开源协议
-├── xenon_logo.ico                  # 应用图标
-├── start_Xenon.bat                 # 命令行启动脚本 (Windows)
-├── start_webui.bat                 # WebUI 启动脚本 (Windows)
-├── start_Terminal.bat              # 终端启动脚本 (Windows)
-├── start_webui.sh                  # WebUI 启动脚本 (Linux/macOS)
-│
-├── xenon_core/                     # 核心引擎（41 个模块）
-│   ├── agent_bootstrap.py          # 智能体启动引导
-│   ├── agent_orchestrator.py       # 智能体编排器
-│   ├── autonomy_runtime.py         # 自主运行运行时
-│   ├── boot_report.py              # 启动报告
-│   ├── chat_entry.py               # 对话入口
-│   ├── chat_runtime.py             # 对话运行时
-│   ├── cli_runtime.py              # 命令行运行时
-│   ├── cognitive_network.py        # 认知网络（记忆图谱）
-│   ├── cognitive_signal_runtime.py # 认知信号处理
-│   ├── context_runtime.py          # 上下文管理运行时
-│   ├── context_tooling.py          # 上下文工具管理
-│   ├── context_trim.py             # 上下文裁剪
-│   ├── delivery_closure.py         # 交付闭环
-│   ├── eval_runtime.py             # 自评估运行时
-│   ├── execution_context.py        # 执行上下文
-│   ├── execution_journal.py        # 执行日志
-│   ├── history_runtime.py          # 历史记录
-│   ├── message_flow.py             # 消息流控制
-│   ├── model_request.py            # 模型请求封装
-│   ├── multi_agent_runtime.py      # 多智能体运行时
-│   ├── orchestration_runtime.py    # 编排运行时
-│   ├── phase_policy.py             # 阶段策略
-│   ├── project_memory.py           # 项目记忆管理
-│   ├── prompt_runtime.py           # 提示词运行时
-│   ├── recovery_manager.py         # 故障恢复
-│   ├── response_runtime.py         # 响应生成运行时
-│   ├── runtime_control.py          # 运行时控制
-│   ├── runtime_health.py           # 运行时健康检查
-│   ├── self_model.py               # 自我模型管理
-│   ├── semantic_router_runtime.py  # 语义路由
-│   ├── tool_catalog.py             # 工具目录
-│   ├── tool_dispatch.py            # 工具调度
-│   ├── tool_execution.py           # 工具执行
-│   ├── tool_feedback.py            # 工具反馈
-│   ├── tool_observability.py       # 工具可观测性
-│   ├── tool_payload_runtime.py     # 工具载荷运行时
-│   ├── tool_router.py              # 工具路由分配
-│   ├── tool_runtime.py             # 工具运行时
-│   ├── turn_compactor.py           # 轮次压缩
-│   └── turn_runtime.py             # 轮次运行时
-│
-├── Tools/                          # 工具模块
-│   ├── code_editor/                # 代码编辑器（含导航器）
-│   ├── soul/                       # 自我模型与灵魂引擎
-│   ├── ssh_handler/                # SSH 远程连接
-│   ├── asr_handler/                # 语音识别
-│   ├── tts_handler/                # 语音合成
-│   ├── freecad_handler/            # FreeCAD 3D 建模集成
-│   ├── causal_reasoner.py          # 因果推理引擎
-│   ├── chart_handler.py            # 图表生成
-│   ├── code_navigator.py           # 代码智能导航
-│   ├── computational_engine.py     # 计算引擎
-│   ├── context_manager_tool.py     # 上下文管理
-│   ├── debug_handler.py            # 调试工具
-│   ├── ds_balance.py               # DeepSeek 余额查询
-│   ├── excel_handler.py            # Excel 处理
-│   ├── file_manager.py             # 文件管理
-│   ├── github_manager.py           # GitHub 管理
-│   ├── memory_query_handler.py     # 记忆查询
-│   ├── pdf_handler.py              # PDF 处理
-│   ├── program_packager.py         # 程序打包
-│   ├── skill_handler.py            # 技能文档管理
-│   ├── sub_agent_handler.py        # 子智能体管理
-│   ├── task_chain_handler.py       # 任务链编排
-│   ├── terminal_handler.py         # 终端执行
-│   ├── video_handler.py            # 视频处理
-│   ├── vision_tool.py              # 视觉识别
-│   ├── web_search_handler.py       # 网络搜索
-│   ├── web_video_renderer.py       # 网页视频渲染
-│   ├── word_handler.py             # Word 处理
-│   └── wps_handler.py              # WPS Office 处理
-│
-├── webui/                          # Web 界面
-│   ├── index.html                  # 前端页面
-│   ├── main.py                     # 后端服务
-│   ├── database.py                 # SQLite 会话存储
-│   ├── stream_adapter.py           # SSE 流式适配
-│   ├── start.bat                   # Windows 启动脚本
-│   ├── start.sh                    # Linux 启动脚本
-│   └── README.md                   # WebUI 说明文档
-│
-├── prompts/                        # 提示词
-│   └── prompt.md                   # 系统提示词
-│
-├── Skills/                         # 技能文档（可沉淀经验）
-├── assets/                         # 静态资源
-│   └── screenshots/                # 截图
-└── README.md                       # 项目介绍
+# Linux / macOS
+bash start_Xenon.sh   # 启动器模式（launcher.py）
+bash start_webui.sh   # WebUI 模式
 ```
 
 ## 核心概念
@@ -249,6 +170,11 @@ Xenon 的核心是递归对话架构：每一轮对话开始时会重新加载�
 | 网页视频渲染 | 网页内容渲染为视频 | `load_module(['web_video_renderer'])` |
 | 终端 | 系统命令执行 | `load_module(['terminal_handler'])` |
 | 上下文管理 | 上下文状态检查与压缩 | `load_module(['context_manager_tool'])` |
+| 知识图谱 | 知识图谱构建、查询与推理 | `load_module(['knowledge_graph_handler'])` |
+| 逻辑验证 | 形式逻辑证明与命题验证 | `load_module(['logic_proof_validator'])` |
+| 灵魂引擎 | 自我模型管理、递归内省 | `load_module(['soul_handler'])` |
+| 仿真验证 | 仿真建模、参数扫描与验证 | `load_module(['simulation_validator'])` |
+| OCR 文字识别 | 图片文字识别与提取 | `load_module(['ocr_tool'])` |
 
 ## 开源协议
 
