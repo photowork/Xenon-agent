@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Union, Tuple
 
-__version__ = "0.3.9"
+__version__ = "0.4.0"
 APP_VERSION = __version__
 
 from xenon_core.cognitive_network import CognitiveNetworkState
@@ -104,7 +104,6 @@ from xenon_core.semantic_router_runtime import (
 )
 from xenon_core.tool_payload_runtime import (
     compress_tool_messages_in_place as core_compress_tool_messages_in_place,
-    externalize_tool_result_for_context as core_externalize_tool_result_for_context,
     summarize_tool_payload_for_context as core_summarize_tool_payload_for_context,
 )
 from xenon_core.turn_compactor import (
@@ -159,10 +158,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 HISTORY_DIR = PROJECT_ROOT / ".agent_history"
 CONTEXT_DIR = PROJECT_ROOT / "Context"
 TRACE_LOG_DIR = PROJECT_ROOT / "logs" / "api_traces"
-TOOL_RESULT_ARCHIVE_DIR = PROJECT_ROOT / "generated" / "tool_results"
-TOOL_RESULT_RETENTION_DAYS = getattr(deepseek_config, "TOOL_RESULT_RETENTION_DAYS", 7)
-TOOL_RESULT_MAX_FILES = getattr(deepseek_config, "TOOL_RESULT_MAX_FILES", 500)
-TOOL_RESULT_MAX_BYTES = getattr(deepseek_config, "TOOL_RESULT_MAX_BYTES", 512 * 1024 * 1024)
 
 API_KEY = deepseek_config.API_KEY
 BASE_URL = deepseek_config.BASE_URL
@@ -183,7 +178,6 @@ except ImportError:
 MAX_RETRY_ATTEMPTS = 3
 NETWORK_RETRY_DELAY = 2
 API_TIMEOUT = 120  # API 请求超时时间（秒）
-TOOL_CALL_TIMEOUT = getattr(deepseek_config, "TOOL_CALL_TIMEOUT", 90)  # 单次工具调用硬超时（秒）
 
 ENABLE_STREAMING = True  # 是否启用流式响应
 ENABLE_THINKING_MODE = getattr(deepseek_config, "ENABLE_THINKING_MODE", True)  # 使用 DeepSeek thinking 开关
@@ -712,24 +706,6 @@ class AIAgent:
 
     def _safe_stringify_result(self, value: Any, max_chars: int = 1500) -> str:
         return safe_stringify_result(value, max_chars=max_chars)
-
-    def _prepare_tool_result_for_context(
-        self,
-        tool_call_id: str,
-        tool_name: str,
-        arguments: Dict[str, Any],
-        content: str,
-    ) -> str:
-        return core_externalize_tool_result_for_context(
-            content=content,
-            tool_name=tool_name,
-            tool_call_id=tool_call_id,
-            archive_dir=TOOL_RESULT_ARCHIVE_DIR,
-            summarize_tool_payload_fn=self._summarize_tool_payload_for_context,
-            retention_days=TOOL_RESULT_RETENTION_DAYS,
-            max_files=TOOL_RESULT_MAX_FILES,
-            max_total_bytes=TOOL_RESULT_MAX_BYTES,
-        )
 
     def _build_tool_call_snapshot(
         self,
@@ -1736,8 +1712,6 @@ class AIAgent:
             stream_callback=self._stream_callback,
             current_phase=self.orchestration_decision.phase if self.orchestration_decision else None,
             logger=logger,
-            tool_timeout_seconds=TOOL_CALL_TIMEOUT,
-            prepare_tool_result_for_context_fn=self._prepare_tool_result_for_context,
         )
 
     def run(self):

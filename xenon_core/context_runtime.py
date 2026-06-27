@@ -15,10 +15,10 @@ MAX_CONTEXT_TOKENS_DEFAULT = 50000
 OUTPUT_TOKEN_RESERVE = 8000
 TIKTOKEN_AVAILABLE = tiktoken is not None
 
-# DeepSeek V3 tokenizer 路径（随 xenon_core 一起分发，避免依赖临时目录或固定盘符）
+# DeepSeek V3 tokenizer 路径（位于 xenon_core 根目录）
 _DEFAULT_DS_TOKENIZER_PATH = (
     Path(__file__).resolve().parent
-    / "deepseek_v3_tokenizer" / "tokenizer.json"
+    / "tokenizer.json"
 )
 
 

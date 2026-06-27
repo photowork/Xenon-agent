@@ -111,7 +111,8 @@ class FileManager:
     # 最大允许返回条目数
     MAX_HARD_LIMIT = 1000
     # 单次工具结果中允许返回的最大文本字符数
-    MAX_CHUNK_SIZE = 5000
+    # 2026-06-27 Xenon: 从5000提升到20000，减少大文件分块读取次数，防止跨页数据丢失
+    MAX_CHUNK_SIZE = 20000
 
     def __init__(self, base_path: str = "."):
         """
@@ -794,7 +795,7 @@ class FileManager:
     def read_file_content(self,
                           file_path: str,
                           encoding: str = "utf-8",
-                          max_size: int = 50 * 1024,
+                          max_size: int = 200 * 1024,  # 2026-06-27: 从50KB提升到200KB
                           preview_only: bool = False) -> Dict[str, Any]:
         """读取文件内容"""
         try:
@@ -858,7 +859,7 @@ class FileManager:
 
         :param file_path: 要读取的文本文件路径。
         :param chunk_index: 从 0 开始的块索引。继续读取时必须使用返回的 next_chunk_index。
-        :param chunk_size: 每块字符数；最大 5000，超过时会自动限制为 5000，避免块内容被截断。
+        :param chunk_size: 每块字符数；最大 20000，超过时会自动限制为 20000，避免块内容被截断。
         :param encoding: 首选文本编码，解码失败时会自动尝试其他常见编码。
         :return: 当前块内容及 has_more、next_chunk_index、next_arguments 等续读信息。
         """
