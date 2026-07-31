@@ -272,12 +272,12 @@ class SubAgentToolManager:
             "success": True,
             "execution_mode": "sequential_batch",
             "roles": [
-                {"role": "planner", "default_tools": ["memory_query", "code_navigator"]},
-                {"role": "executor", "default_tools": ["terminal_handler", "code_editor", "file_manager"]},
+                {"role": "planner", "default_tools": ["memory_query", "code_editor_handler"]},
+                {"role": "executor", "default_tools": ["terminal_handler", "code_editor"]},
                 {"role": "verifier", "default_tools": ["terminal_handler", "debug_handler"]},
-                {"role": "researcher", "default_tools": ["memory_query", "file_manager"]},
-                {"role": "critic", "default_tools": ["code_navigator", "debug_handler"]},
-                {"role": "integrator", "default_tools": ["file_manager", "terminal_handler"]},
+                {"role": "researcher", "default_tools": ["memory_query"]},
+                {"role": "critic", "default_tools": ["code_editor_handler", "debug_handler"]},
+                {"role": "integrator", "default_tools": ["terminal_handler"]},
             ],
         }
 

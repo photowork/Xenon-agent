@@ -23,7 +23,11 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import traceback
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -60,6 +64,11 @@ PADDLEOCR_LANG_MAP = {
     "fr": "fr",                     # 法文
     "de": "de",                     # 德文
 }
+
+# ── 异步 OCR 默认配置 ──
+OCR_STATE_FILE = Path("Memory/ocr_tasks.json")
+MAX_OCR_TASK_HISTORY = 50
+MAX_OCR_THREADS = 4                 # OCR 是 CPU/GPU 密集型，不宜过多
 
 
 # ---------------------------------------------------------------------------
@@ -826,10 +835,289 @@ class OCRHandler:
 # OCRToolManager — 外部接口
 # ---------------------------------------------------------------------------
 class OCRToolManager:
-    """OCR 工具管理器"""
+    """OCR 工具管理器 — 同步 + 异步 OCR。
+
+    同步方法（阻塞）:
+        ocr_image / ocr_images / ocr_directory / ocr_image_to_text
+
+    异步方法（线程池 + 轮询池，不阻塞）:
+        ocr_image_async / ocr_images_async / ocr_status / ocr_wait
+
+    所有异步任务完成后自动推送结果到 MessagePollingPool。
+    """
 
     def __init__(self, lang: str = "ch"):
         self.handler = OCRHandler(lang=lang)
+        # ── 异步状态 ──
+        self._tasks: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self._state_file = OCR_STATE_FILE
+        self._cancel_flags: Dict[str, threading.Event] = {}
+        self._executor = ThreadPoolExecutor(max_workers=MAX_OCR_THREADS)
+        self._futures: Dict[str, Any] = {}
+        self._load_state()
+
+    # ═══════════════════════════════════════════════════════════ #
+    #  异步 OCR — 线程池 + 轮询池
+    # ═══════════════════════════════════════════════════════════ #
+
+    def ocr_image_async(
+        self, image_path: str, background: bool = True
+    ) -> Dict[str, Any]:
+        """异步 OCR 识别单张图片（默认不阻塞）。
+
+        后台模式 (background=True)：OCR 在线程池中执行，立即返回 task_id。
+        结果完成后自动推送到 MessagePollingPool。
+
+        Args:
+            image_path: 图片文件路径
+            background: True → 后台执行，立即返回 task_id
+                        False → 同步执行（阻塞等待）
+
+        Returns:
+            后台模式: {"success": True, "task_id": "...", "status": "pending"}
+            同步模式: 完整 OCR 结果字典
+
+        💡 调用建议：单张图片且不急于获取结果时，优先使用此异步方法。
+           大量图片请用 ocr_images_async 批量异步。
+        """
+        path = Path(image_path)
+        if not path.exists():
+            return {"success": False, "error": f"文件不存在: {image_path}"}
+        if not is_image_file(image_path):
+            return {
+                "success": False,
+                "error": f"不支持的图片格式: {path.suffix}，"
+                         f"支持的格式: {', '.join(sorted(SUPPORTED_IMAGE_EXTENSIONS))}",
+            }
+
+        task_id = uuid.uuid4().hex[:8]
+
+        if not background:
+            result = self.handler.ocr_image(image_path)
+            result["task_id"] = task_id
+            return result
+
+        # 后台模式：提交到线程池
+        self._register_task(task_id, {
+            "type": "ocr_single",
+            "image_path": str(path),
+            "status": "pending",
+            "created_at": time.time(),
+        })
+
+        future = self._executor.submit(self._ocr_worker, task_id, image_path)
+        self._futures[task_id] = future
+
+        return {
+            "success": True,
+            "task_id": task_id,
+            "status": "pending",
+            "message": f"OCR 任务已提交: {task_id}",
+        }
+
+    def ocr_images_async(
+        self, image_paths: List[str], background: bool = True
+    ) -> Dict[str, Any]:
+        """异步批量 OCR（默认不阻塞，线程池并行处理）。
+
+        每张图片独立提交到线程池，MAX_OCR_THREADS 控制并发度。
+
+        Args:
+            image_paths: 图片路径列表
+            background: True → 批量并行后台执行
+                        False → 同步批量（阻塞）
+
+        Returns:
+            后台模式: {"success": True, "task_ids": [...], "total": N, "status": "pending"}
+            同步模式: 完整批量结果字典
+
+        💡 调用建议：大量图片（≥3张）请优先使用此异步方法，线程池并行处理不阻塞。
+        """
+        if not image_paths:
+            return {"success": False, "error": "image_paths 不能为空"}
+
+        if not background:
+            return self.handler.ocr_images(image_paths)
+
+        task_ids = []
+        for img_path in image_paths:
+            r = self.ocr_image_async(img_path, background=True)
+            if r.get("success"):
+                task_ids.append(r["task_id"])
+            else:
+                task_ids.append(None)
+
+        valid_count = len([t for t in task_ids if t])
+        return {
+            "success": True,
+            "task_ids": task_ids,
+            "total": len(image_paths),
+            "success_count": valid_count,
+            "error_count": len(image_paths) - valid_count,
+            "status": "pending",
+            "message": f"已提交 {valid_count}/{len(image_paths)} 个 OCR 任务",
+        }
+
+    def ocr_status(self, task_id: str) -> Dict[str, Any]:
+        """查询 OCR 异步任务状态。
+
+        Args:
+            task_id: 任务 ID
+
+        Returns:
+            {"success": True, "data": {"task_id": ..., "status": "pending|running|completed|failed", ...}}
+        """
+        with self._lock:
+            task = self._tasks.get(task_id)
+        if not task:
+            return {"success": False, "error": f"任务不存在: {task_id}"}
+        return {"success": True, "data": dict(task)}
+
+    def ocr_wait(
+        self, task_id: str, timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """等待 OCR 异步任务完成。
+
+        Args:
+            task_id: 任务 ID
+            timeout: 超时秒数，None 表示无限等待
+
+        Returns:
+            任务结果，超时时返回当前状态
+        """
+        with self._lock:
+            task = self._tasks.get(task_id)
+        if not task:
+            return {"success": False, "error": f"任务不存在: {task_id}"}
+
+        future = self._futures.get(task_id)
+        if not future:
+            return {"success": True, "data": dict(task)}
+
+        try:
+            future.result(timeout=timeout)
+        except Exception:
+            pass  # 超时或取消，返回当前状态
+
+        with self._lock:
+            task = self._tasks.get(task_id, {})
+        return {"success": True, "data": dict(task)}
+
+    # ═══════════════════════════════════════════════════════════ #
+    #  内部 — OCR worker
+    # ═══════════════════════════════════════════════════════════ #
+
+    def _ocr_worker(self, task_id: str, image_path: str) -> None:
+        """OCR 工作线程：执行同步 OCR 并推送结果。
+
+        在线程池中运行，完成后自动：
+          1. 更新任务状态为 completed/failed
+          2. 推送结果到 MessagePollingPool
+        """
+        try:
+            self._update_task(task_id, {"status": "running"})
+            result = self.handler.ocr_image(image_path)
+            result["task_id"] = task_id
+            self._update_task(task_id, {
+                "status": "completed",
+                "result": result,
+                "completed_at": time.time(),
+            })
+            self._push_to_pool(task_id, result)
+        except Exception as e:
+            error_result = {
+                "success": False,
+                "error": f"OCR 任务异常: {str(e)}",
+                "task_id": task_id,
+                "traceback": traceback.format_exc(),
+            }
+            self._update_task(task_id, {
+                "status": "failed",
+                "error": str(e),
+                "failed_at": time.time(),
+            })
+            self._push_to_pool(task_id, error_result)
+
+    # ═══════════════════════════════════════════════════════════ #
+    #  内部 — 轮询池推送
+    # ═══════════════════════════════════════════════════════════ #
+
+    def _push_to_pool(self, task_id: str, result: Dict[str, Any]) -> None:
+        """将 OCR 任务结果推送到消息轮询池。"""
+        try:
+            from xenon_core.polling_pool import get_pool, PoolMessage
+
+            pool = get_pool()
+            is_success = result.get("success", False)
+            pool.push(
+                PoolMessage(
+                    source="ocr_tool",
+                    scenario="ocr",
+                    msg_type="result",
+                    payload={"task_id": task_id, **result},
+                    priority=2 if not is_success else 1,
+                    ttl=3600,  # 1 小时后过期
+                )
+            )
+        except ImportError:
+            pass  # 轮询池未初始化（如在独立脚本中运行）
+        except Exception:
+            pass  # 推送失败非致命
+
+    # ═══════════════════════════════════════════════════════════ #
+    #  内部 — 任务状态管理
+    # ═══════════════════════════════════════════════════════════ #
+
+    def _register_task(self, task_id: str, task_data: Dict[str, Any]) -> None:
+        """注册新任务并持久化。"""
+        with self._lock:
+            task_data["task_id"] = task_id
+            self._tasks[task_id] = task_data
+            self._trim_history()
+            self._save_state()
+
+    def _update_task(self, task_id: str, updates: Dict[str, Any]) -> None:
+        """更新任务状态并持久化。"""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task:
+                task.update(updates)
+                task["updated_at"] = time.time()
+            self._save_state()
+
+    def _trim_history(self) -> None:
+        """超出上限时清理最旧的任务。"""
+        if len(self._tasks) <= MAX_OCR_TASK_HISTORY:
+            return
+        sorted_tasks = sorted(
+            self._tasks.items(),
+            key=lambda kv: kv[1].get("created_at", 0),
+            reverse=True,
+        )
+        keep_ids = {tid for tid, _ in sorted_tasks[:MAX_OCR_TASK_HISTORY]}
+        for tid in list(self._tasks.keys()):
+            if tid not in keep_ids:
+                del self._tasks[tid]
+
+    def _load_state(self) -> None:
+        """从磁盘恢复任务状态。"""
+        try:
+            if self._state_file.exists():
+                with open(self._state_file, "r", encoding="utf-8") as f:
+                    self._tasks = json.load(f)
+        except Exception:
+            pass
+
+    def _save_state(self) -> None:
+        """持久化任务状态到磁盘。"""
+        try:
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock:
+                with open(self._state_file, "w", encoding="utf-8") as f:
+                    json.dump(self._tasks, f, ensure_ascii=False, indent=2, default=str)
+        except Exception:
+            pass
 
     def ocr_image(self, image_path: str) -> Dict[str, Any]:
         """识别单张图片，结果自动保存到 output/ocr/（json + txt）
@@ -844,6 +1132,9 @@ class OCRToolManager:
         Returns:
             Dict with keys: success, result (含 text/confidence/line_count/lines),
             output_files (自动保存的文件路径), message
+
+        💡 调用建议：单张或少量图片用此同步方法即可；
+           大量图片（≥3张）请改用 ocr_images_async 异步方法，避免长时间阻塞。
         """
         try:
             return self.handler.ocr_image(image_path)
@@ -859,6 +1150,9 @@ class OCRToolManager:
         Returns:
             Dict with keys: success, results (列表), total, success_count, error_count,
             output_files (各图片的保存路径)
+
+        💡 调用建议：少量图片可用此同步方法；
+           大量图片（≥3张）请改用 ocr_images_async 异步方法（线程池并行，不阻塞）。
         """
         try:
             return self.handler.ocr_images(image_paths)
@@ -913,15 +1207,17 @@ class OCRToolManager:
     def list_images(self, base_path: str = ".", recursive: bool = False) -> Dict[str, Any]:
         """列出目录中的图片文件"""
         try:
-            from Tools.file_manager import FileManager
-            fm = FileManager(base_path)
-            result = fm.list_files(
-                recursive=recursive,
-                extensions=list(SUPPORTED_IMAGE_EXTENSIONS),
-            )
-            if result.get("success"):
-                result["message"] = f"找到 {result.get('total_files', 0)} 个图片文件"
-            return result
+            from pathlib import Path
+            base = Path(base_path)
+            if not base.exists():
+                return {"success": False, "error": f"路径不存在: {base_path}"}
+            extensions = set(ext.lower() for ext in SUPPORTED_IMAGE_EXTENSIONS)
+            if recursive:
+                files = sorted(str(p) for p in base.rglob("*") if p.suffix.lower() in extensions and p.is_file())
+            else:
+                files = sorted(str(p) for p in base.glob("*") if p.suffix.lower() in extensions and p.is_file())
+            return {"success": True, "files": files, "total_files": len(files), "current_path": str(base),
+                    "message": f"找到 {len(files)} 个图片文件"}
         except Exception as e:
             return {"success": False, "error": f"列出图片文件失败: {str(e)}"}
 

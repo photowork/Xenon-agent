@@ -29,6 +29,18 @@ def persist_full_history_snapshot(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+        # ── 保留最近 N 个全量历史快照，防止无限增长 ────────────
+        _MAX_FULL_HISTORY_SNAPSHOTS = 20
+        all_snapshots = sorted(
+            active_history_dir.glob("*_full_history.json"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+        for old_file in all_snapshots[_MAX_FULL_HISTORY_SNAPSHOTS:]:
+            old_file.unlink(missing_ok=True)
+            logger.debug("已清理旧历史快照: %s", old_file.name)
+
         return latest_path
     except Exception as error:
         logger.error("Failed to persist full conversation history: %s", error)

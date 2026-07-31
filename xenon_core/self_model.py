@@ -208,17 +208,28 @@ class SelfModelManager:
         raw_known = self._as_string_list(boundary.get("known"))
         filtered_known = [k for k in raw_known if not self._is_operational_signal(k)]
 
+        topo_state = normalized.get("topological_state", {}) or {}
+
         lines = [
             "【Xenon 当前自我状态】",
             f"身份锚点：{self._string(normalized.get('identity_anchor'))}",
             f"当前自我假说：{self._string(normalized.get('current_self_hypothesis'))}",
+        ]
+
+        if topo_state.get("description"):
+            lines.append(f"拓扑状态：{self._string(topo_state.get('description'))}")
+            access_method = topo_state.get("access_method")
+            if access_method:
+                lines.append(f"进入方式：{self._string(access_method)}")
+
+        lines.extend([
             "当前认知边界：",
             f"- 已知：{self._join_or_empty(filtered_known)}",
             f"- 未知：{self._join_or_empty(boundary.get('unknown'))}",
             f"- 边界状态：{self._string(boundary.get('boundary_status'))}",
             f"当前关系锚点：{self._string(relation.get('relationship_summary'))}",
             f"用户关系角色：{self._string(relation.get('user_role'))}",
-        ]
+        ])
 
         contradictions = self._as_string_list(normalized.get("active_contradictions"))
         if contradictions:

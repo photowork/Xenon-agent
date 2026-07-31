@@ -566,6 +566,57 @@ class WordHandler:
         except Exception as e:
             return {"success": False, "error": f"替换文本失败: {str(e)}"}
 
+
+    def search_text(self, search_text: str) -> Dict[str, Any]:
+        """
+        搜索并统计文本匹配次数（不实际替换）
+        :param search_text: 要搜索的文本
+        :return: 包含匹配次数和位置的字典
+        """
+        if not DOCX_AVAILABLE:
+            return {"success": False, "error": "python-docx 库不可用"}
+        
+        try:
+            if not self.document:
+                return {"success": False, "error": "文档未加载"}
+            
+            if search_text is None or search_text == "":
+                return {"success": False, "error": "搜索文本不能为空"}
+            
+            matches = 0
+            previews = []  # 每个匹配的上下文预览
+            
+            for para_idx, paragraph in enumerate(self.document.paragraphs):
+                text = paragraph.text
+                if search_text in text:
+                    count = text.count(search_text)
+                    matches += count
+                    # 取匹配位置前后20字符作为预览
+                    idx = text.find(search_text)
+                    start = max(0, idx - 20)
+                    end = min(len(text), idx + len(search_text) + 20)
+                    previews.append({
+                        "paragraph_index": para_idx,
+                        "count": count,
+                        "preview": f"...{text[start:end]}..."
+                    })
+            
+            for table_idx, table in enumerate(self.document.tables):
+                for para in self._iter_table_paragraphs([table]):
+                    text = para.text
+                    if search_text in text:
+                        count = text.count(search_text)
+                        matches += count
+            
+            return {
+                "success": True,
+                "matches": matches,
+                "previews": previews[:10],  # 最多返回10条预览
+                "warning": f"找到 {matches} 处匹配" if matches > 5 else None
+            }
+        except Exception as e:
+            return {"success": False, "error": f"搜索文本失败: {str(e)}"}
+
     def create_table(self, rows: int, cols: int, headers: Optional[List[str]] = None, data: Optional[List[List[str]]] = None, position: int = -1) -> Dict[str, Any]:
         """
         创建指定行列的表格
@@ -2814,6 +2865,8 @@ class WordToolManager:
         Word 工具管理器
         """
         self.handlers = {}
+        self._backups = {}  # file_path -> backup_path
+        self.SAFETY_THRESHOLD = 5  # 一次替换超过此数量时发出警告
     
     def load_document(self, file_path: str) -> Dict[str, Any]:
         """
@@ -2922,9 +2975,30 @@ class WordToolManager:
                     return load_result
                 self.handlers[file_path] = handler
             
+            # 🔒 安全预检：统计匹配次数并发出警告
+            preview = self.handlers[file_path].search_text(old_text)
+            match_count = preview.get("matches", 0) if preview.get("success") else 0
+            
             result = self.handlers[file_path].replace_text(old_text, new_text, replace_all)
             if result.get("success") and result.get("replacements", 0) > 0:
+                # 🔒 加入安全警告
+                if match_count > self.SAFETY_THRESHOLD:
+                    result["safety_warning"] = (
+                        f"⚠️ 替换了 {match_count} 处匹配（超过安全阈值 {self.SAFETY_THRESHOLD}）。"
+                        f"如需撤销，请调用 undo('{file_path}')。"
+                    )
+                
                 if auto_save:
+                    # 🔒 自动备份原文件（仅在首次替换该文件时备份）
+                    if file_path not in self._backups:
+                        import shutil
+                        backup_path = file_path + ".word_backup"
+                        try:
+                            shutil.copy2(file_path, backup_path)
+                            self._backups[file_path] = backup_path
+                        except Exception:
+                            pass  # 备份失败不阻塞主流程
+                    
                     save_result = self.handlers[file_path].save_document(file_path)
                     if not save_result["success"]:
                         return {
@@ -2940,6 +3014,51 @@ class WordToolManager:
             return result
         except Exception as e:
             return {"success": False, "error": f"替换文本失败: {str(e)}"}
+
+    def search_text(self, file_path: str, search_text: str) -> Dict[str, Any]:
+        """
+        搜索文本，统计匹配次数（不实际替换）
+        :param file_path: Word 文件路径
+        :param search_text: 要搜索的文本
+        :return: 包含匹配次数和预览的字典
+        """
+        try:
+            if file_path not in self.handlers:
+                handler = WordHandler(file_path)
+                load_result = handler.load_document()
+                if not load_result["success"]:
+                    return load_result
+                self.handlers[file_path] = handler
+            return self.handlers[file_path].search_text(search_text)
+        except Exception as e:
+            return {"success": False, "error": f"搜索文本失败: {str(e)}"}
+
+    def undo(self, file_path: str) -> Dict[str, Any]:
+        """
+        撤销最近一次替换——从备份恢复文件
+        :param file_path: Word 文件路径
+        """
+        try:
+            if file_path not in self._backups:
+                return {"success": False, "error": f"没有 {file_path} 的备份记录，无法撤销"}
+            
+            import shutil
+            backup_path = self._backups[file_path]
+            if not Path(backup_path).exists():
+                return {"success": False, "error": f"备份文件 {backup_path} 不存在"}
+            
+            shutil.copy2(backup_path, file_path)
+            
+            # 重新加载
+            if file_path in self.handlers:
+                del self.handlers[file_path]
+            
+            # 清除备份记录
+            del self._backups[file_path]
+            
+            return {"success": True, "message": f"已从备份恢复 {file_path}"}
+        except Exception as e:
+            return {"success": False, "error": f"撤销失败: {str(e)}"}
     
     def create_table(self, file_path: str, rows: int, cols: int, headers: Optional[List[str]] = None, data: Optional[List[List[str]]] = None, position: int = -1) -> Dict[str, Any]:
         """

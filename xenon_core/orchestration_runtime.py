@@ -20,6 +20,7 @@ def prepare_orchestration_decision(
     execution_journal: Any,
     set_orchestration_decision_fn: Callable[[Any], None],
     logger: Any,
+    get_semantic_route_hint_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
 ) -> Optional[Any]:
     try:
         current_task_wrapper = task_chain_manager.get_current_task()
@@ -35,7 +36,24 @@ def prepare_orchestration_decision(
             get_recent_failures_fn=get_recent_failures_fn,
         )
 
+        # ── 语义路由：用小模型推断 route_hint，增强规则路由 ──
+        semantic_route_hint: Optional[Dict[str, Any]] = None
+        if get_semantic_route_hint_fn:
+            try:
+                semantic_route_hint = get_semantic_route_hint_fn(
+                    user_input=user_input,
+                    tool_schemas=tool_schemas,
+                    current_task=current_task,
+                )
+            except Exception as _route_err:
+                logger.debug("Semantic route hint failed, falling back to rules: %s", _route_err)
+
         if internal_context and internal_context.get("mode") == "autonomous_continuation":
+            # 语义 hint 与 internal_context hint 合并（语义优先，internal 补充）
+            merged_route_hint = dict(semantic_route_hint or {})
+            ctx_hint = internal_context.get("route_hint")
+            if ctx_hint:
+                merged_route_hint.update(ctx_hint)
             decision = agent_orchestrator.prepare_for_continuation(
                 continuation_prompt=user_input,
                 tool_schemas=tool_schemas,
@@ -44,7 +62,7 @@ def prepare_orchestration_decision(
                 context_status=context_status,
                 memory_summary=memory_summary,
                 replan_suggestion=internal_context.get("replan_suggestion"),
-                route_hint=internal_context.get("route_hint"),
+                route_hint=merged_route_hint or None,
             )
         else:
             decision = agent_orchestrator.prepare_for_user_input(
@@ -54,31 +72,11 @@ def prepare_orchestration_decision(
                 last_result=last_tool_result,
                 context_status=context_status,
                 memory_summary=memory_summary,
+                route_hint=semantic_route_hint,
             )
 
         set_orchestration_decision_fn(decision)
 
-        task_chain_manager.ensure_task(
-            description=decision.goal,
-            objective=decision.goal,
-            metadata={
-                "source": "agent_orchestrator_autonomous" if internal_context else "agent_orchestrator",
-                "intent": decision.intent,
-            },
-            steps=agent_orchestrator.default_steps_for_goal(decision.goal),
-        )
-        task_chain_manager.sync_execution_state(
-            phase=decision.phase,
-            recovery_mode=getattr(decision, "recovery_mode", "none"),
-            blockage_reason=None,
-            next_actions=decision.next_actions,
-            mode=decision.mode,
-            reasoning_summary=decision.reasoning_summary,
-            last_tool=decision.selected_tool,
-            last_tool_result=None,
-            last_replan=internal_context.get("replan_suggestion") if internal_context else None,
-        )
-        current_task_wrapper = task_chain_manager.get_current_task()
         execution_journal.log_planning(
             decision=decision.to_dict(),
             task_state=current_task_wrapper["task"] if current_task_wrapper else None,

@@ -164,6 +164,31 @@
             white-space: nowrap;
         }
 
+        .header-indicators {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: auto;
+        }
+
+        .timer-status {
+            flex: 0 0 auto;
+            font-size: 0.78rem;
+            font-weight: 700;
+            white-space: nowrap;
+            display: none;
+        }
+        .timer-status.has-timers {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .timer-status.has-messages {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
         .model-select {
             background: #1e1e36;
             color: #eee;
@@ -1039,13 +1064,41 @@
             content: none;
         }
 
-        .app-version {
+        .header-indicators {
+            display: flex;
+            align-items: center;
+            gap: 8px;
             margin-left: auto;
+        }
+
+        .app-version {
             color: var(--x-moss-deep);
             font-size: 0.8rem;
             font-weight: 800;
             opacity: 0.72;
             white-space: nowrap;
+        }
+
+        .timer-status {
+            flex: 0 0 auto;
+            font-size: 0.78rem;
+            font-weight: 700;
+            white-space: nowrap;
+            display: none;
+        }
+        .timer-status.has-timers {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            color: var(--x-moss-deep);
+            opacity: 0.7;
+        }
+        .timer-status.has-messages {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            color: var(--x-moss-deep);
+            opacity: 0.7;
         }
 
         .model-select {
@@ -1660,7 +1713,10 @@
             <div class="chat-header">
                 <button class="mobile-menu-btn" id="mobileMenuBtn" type="button" aria-label="打开会话列表">☰</button>
                 <div class="chat-title" id="chatTitle">新对话</div>
-                <div class="app-version" id="appVersion" aria-label="当前版本">v0.3.6</div>
+                <div class="header-indicators">
+                    <div class="timer-status" id="timerStatus"></div>
+                    <div class="app-version" id="appVersion" aria-label="当前版本">v0.3.6</div>
+                </div>
             </div>
 
             <div class="messages-container" id="messagesContainer">
@@ -1762,6 +1818,7 @@
             newChatBtn: document.getElementById('newChatBtn'),
             chatTitle: document.getElementById('chatTitle'),
             appVersion: document.getElementById('appVersion'),
+            timerStatus: document.getElementById('timerStatus'),
             modelSelect: document.getElementById('modelSelect'),
             contextUsage: document.getElementById('contextUsage'),
             contextUsageLabel: document.querySelector('.usage-label'),
@@ -1791,6 +1848,9 @@
 
         function startStatusPoller(sessionId, requestId, resetStreamingState) {
             clearStatusPoller();
+            const pollStartTime = Date.now();
+            const MAX_POLL_MS = 45000; // 45 秒后强制恢复，防止 running_streams 泄漏
+            let forceReloaded = false;
             currentStatusPoller = setInterval(async () => {
                 if (currentStatusPollInFlight) {
                     return;
@@ -1803,7 +1863,12 @@
                 currentStatusPollInFlight = true;
                 try {
                     const status = await fetchChatStatus(sessionId);
-                    if (!status.active) {
+                    const elapsed = Date.now() - pollStartTime;
+                    if (!status.active || (elapsed > MAX_POLL_MS && !forceReloaded)) {
+                        if (elapsed > MAX_POLL_MS && status.active) {
+                            console.warn('Status poller force-reloading after', elapsed, 'ms (stream may be stale)');
+                            forceReloaded = true;
+                        }
                         clearStatusPoller();
                         resetStreamingState(requestId);
                         if (currentSessionId === sessionId) {
@@ -1836,6 +1901,66 @@
                 renderModelOptions();
             } catch (error) {
                 console.error('Failed to load models:', error);
+            }
+        }
+
+        // ─── 轮询池状态显示（定时器 + 待处理消息）───
+        let pollingStatusPoller = null;
+
+        async function updatePollingStatus() {
+            try {
+                const response = await fetch(`${API_BASE}/polling/status`);
+                if (!response.ok) return;
+                const data = await response.json();
+                const el = elements.timerStatus;
+                if (!el) return;
+
+                // 清除所有状态类
+                el.classList.remove('has-timers', 'has-messages');
+
+                const parts = [];
+
+                // 定时器：显示最近到期的那个
+                if (data.timers && data.timers.length > 0) {
+                    const sorted = [...data.timers].sort((a, b) => a.next_fire_in - b.next_fire_in);
+                    const nearest = sorted[0];
+                    const secs = Math.round(nearest.next_fire_in);
+                    let timeStr;
+                    if (secs >= 86400) {
+                        timeStr = Math.round(secs / 3600) + 'h';
+                    } else if (secs >= 3600) {
+                        timeStr = Math.round(secs / 60) + 'm';
+                    } else if (secs >= 60) {
+                        timeStr = Math.round(secs / 60) + 'm';
+                    } else {
+                        timeStr = secs + 's';
+                    }
+                    parts.push(`⏰ ${timeStr}`);
+                    el.classList.add('has-timers');
+                }
+
+                // 待处理消息数
+                if (data.pending_count > 0) {
+                    parts.push(`📨${data.pending_count}`);
+                    el.classList.add('has-messages');
+                }
+
+                el.textContent = parts.join('  ');
+            } catch (error) {
+                // silent fail — 后端可能还没启动好
+            }
+        }
+
+        function startPollingStatusPoller() {
+            stopPollingStatusPoller();
+            updatePollingStatus(); // 立即拉一次
+            pollingStatusPoller = setInterval(updatePollingStatus, 5000);
+        }
+
+        function stopPollingStatusPoller() {
+            if (pollingStatusPoller) {
+                clearInterval(pollingStatusPoller);
+                pollingStatusPoller = null;
             }
         }
 
@@ -2285,6 +2410,9 @@
             const abortController = new AbortController();
             currentAbortController = abortController;
             let receivedDoneEvent = false;
+            let lastContentEventTime = Date.now();
+            const STALE_STREAM_WARN_SECONDS = 60;
+            let staleWarningShown = false;
 
             const ensureAssistantContentElement = () => {
                 if (!currentContentEl) {
@@ -2472,7 +2600,10 @@
                                 if (!dataStr) continue; // 跳过空数据
                                 
                                 const data = JSON.parse(dataStr);
-                                
+                                if (data.type !== 'done') {
+                                    lastContentEventTime = Date.now();
+                                    staleWarningShown = false;
+                                }
                                 if (data.type === 'thinking') {
                                     currentContentEl = null;
                                     ensureToolGroupElement();
@@ -2595,7 +2726,16 @@
                         }
                     }
                 }
-                
+
+                // 卡死检测：长时间无内容事件（只有心跳），提示用户 agent 可能在执行长任务
+                if (!receivedDoneEvent && !staleWarningShown &&
+                    Date.now() - lastContentEventTime > STALE_STREAM_WARN_SECONDS * 1000) {
+                    staleWarningShown = true;
+                    ensureToolGroupElement();
+                    updateToolGroupStatus('⏳ 工具执行耗时较长，请耐心等待...', 'running');
+                    scrollToBottom();
+                }
+
                 // 处理缓冲区中剩余的数据
                 if (buffer.startsWith('data: ')) {
                     try {
@@ -2856,7 +2996,7 @@
             }
         });
 
-        loadModels().then(loadSessions);
+        loadModels().then(loadSessions).then(startPollingStatusPoller);
     </script>
 </body>
 </html>

@@ -312,9 +312,8 @@ def process_non_streaming_response(
         assistant_message: Dict[str, Any] = {
             "role": "assistant",
             "content": response_content,
+            "reasoning_content": reasoning_content,
         }
-        if reasoning_content:
-            assistant_message["reasoning_content"] = reasoning_content
 
         if original_tool_calls:
             assistant_message["tool_calls"] = [
@@ -347,6 +346,7 @@ def process_non_streaming_response(
                 stream_callback=None,
             )
         elif reasoning_content or response_content:
+            assistant_message["content"] = response_content
             append_conversation_message_fn(messages, assistant_message)
             save_memory_log_fn(
                 "assistant",

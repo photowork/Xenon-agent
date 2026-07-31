@@ -25,12 +25,12 @@ TERMINAL_RUN_STATUSES = {
     "skipped",
 }
 ROLE_TOOL_MAP = {
-    "planner": ["memory_query", "code_navigator"],
-    "executor": ["terminal_handler", "code_editor_handler", "file_manager"],
+    "planner": ["memory_query", "code_editor_handler"],
+    "executor": ["terminal_handler", "code_editor_handler"],
     "verifier": ["terminal_handler", "debug_handler"],
-    "researcher": ["memory_query", "file_manager"],
-    "critic": ["code_navigator", "debug_handler"],
-    "integrator": ["file_manager", "terminal_handler"],
+    "researcher": ["memory_query"],
+    "critic": ["code_editor_handler", "debug_handler"],
+    "integrator": ["terminal_handler"],
 }
 DEFAULT_ROLES: Tuple[str, ...] = tuple(ROLE_TOOL_MAP.keys())
 LOCK_TIMEOUT_SECONDS = 10.0

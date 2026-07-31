@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""Cognitive Network — reads from Memory/memory_Write and .agent_history
+"""Cognitive Network — reads from MemoryAPI (分层因果记忆网络)
    to build a compact, scored memory summary for system-prompt injection.
-
-   Replaces the old graph-based system that relied on metacognition writes.
 """
 
 from __future__ import annotations
 
-import json
 import math
 import re
-import os
 from collections import Counter, deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
+
+from .memory_core import MemoryAPI, create_api
+from .memory_core.node import MemoryNode
 
 logger = None  # set by caller if needed
 
@@ -47,7 +46,7 @@ IMPORTANCE_KEYWORDS: Dict[str, float] = {
 # filename patterns to EXCLUDE (tool noise)
 EXCLUDE_PATTERNS: List[str] = [
     r"execute_tool", r"tool_call", r"load_module", r"failed during",
-    r"failed because", r"code_navigator_", r"file_manager_",
+    r"failed because", r"code_editor_handler_",
     r"code_editor_", r"terminal_handler_", r"debug_handler_",
     r"web_search_", r"vision_tool_", r"excel_handler_",
     r"word_handler_", r"pdf_handler_", r"chart_handler_",
@@ -56,7 +55,7 @@ EXCLUDE_PATTERNS: List[str] = [
 
 TOOL_NOISE_WORDS = [
     "failed during", "failed because", "tool_call", "load_module",
-    "code_navigator", "file_manager", "code_editor",
+    "code_editor_handler", "code_editor",
 ]
 
 # ── helpers ─────────────────────────────────────────────────────
@@ -67,17 +66,6 @@ def _has_exclude_pattern(text: str) -> bool:
         if re.search(pat, lower):
             return True
     return False
-
-
-def _filename_date(fname: str) -> Optional[datetime]:
-    """Parse YYYY-MM-DD or YYYYMMDD from filename."""
-    m = re.search(r"(\d{4})[-_]?(\d{2})[-_]?(\d{2})", fname)
-    if m:
-        try:
-            return datetime(int(m[1]), int(m[2]), int(m[3]))
-        except ValueError:
-            pass
-    return None
 
 
 def _now() -> datetime:
@@ -99,17 +87,14 @@ class CognitiveNetworkState:
     def __init__(
         self,
         network_path: Optional[str] = None,
-        memory_dir: str = "Memory/memory_Write",
-        history_dir: str = ".agent_history",
+        memory_api: Optional[MemoryAPI] = None,
     ):
         # network_path is retained for compatibility with older callers. The
         # cognitive index is now memory-only and is never persisted to disk.
-        self._write_dir = Path(memory_dir)
-        self._hist_dir = Path(history_dir)
+        self._api = memory_api or create_api()
 
         # in-memory index
         self._entries: List[Dict[str, Any]] = []   # scored memory entries
-        self._cached_mtime_map: Dict[str, float] = {}  # file → mtime
 
         # activation tracking (keep from old API)
         self._activation_usage_history: deque = deque(maxlen=10)
@@ -248,29 +233,21 @@ class CognitiveNetworkState:
     # ── internal: index builder ────────────────────────────────
 
     def _build_index(self) -> None:
-        """Scan sources and rebuild scored entries."""
+        """Load all memories from MemoryAPI and rebuild scored entries."""
         entries: List[Dict[str, Any]] = []
 
-        # 1. memory_Write
-        if self._write_dir.exists():
-            for f in sorted(self._write_dir.iterdir()):
-                if not f.is_file() or not f.name.endswith(".txt"):
-                    continue
-                if _has_exclude_pattern(f.name):
-                    continue
-                entry = self._parse_write_file(f)
-                if entry:
-                    entries.append(entry)
+        # Load all nodes from MemoryAPI
+        all_nodes = self._api.store.list_all()
 
-        # 2. .agent_history — only the 5 most recent files (keeps it light)
-        if self._hist_dir.exists():
-            hist_files = sorted(self._hist_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
-            for f in hist_files[:5]:
-                if not f.is_file() or not f.name.endswith(".json"):
-                    continue
-                entries.extend(self._parse_history_file(f))
+        for node in all_nodes:
+            # Skip tool-noise entries
+            if _has_exclude_pattern(node.title) or _has_exclude_pattern(node.summary):
+                continue
+            entry = self._node_to_entry(node)
+            if entry:
+                entries.append(entry)
 
-        # Deduplicate by content hash
+        # Deduplicate by summary
         seen = set()
         deduped = []
         for e in entries:
@@ -286,103 +263,43 @@ class CognitiveNetworkState:
 
         self._entries = deduped
 
-    def _parse_write_file(self, path: Path) -> Optional[Dict[str, Any]]:
-        """Parse a memory_Write .txt file into a scored entry."""
-        try:
-            content = path.read_text(encoding="utf-8").strip()
-        except Exception:
-            return None
-        if not content or len(content) < 20:
+    def _node_to_entry(self, node: MemoryNode) -> Optional[Dict[str, Any]]:
+        """Convert a MemoryAPI MemoryNode to internal entry format."""
+        if not node.summary and not node.content:
             return None
 
-        fname = path.name
-        created = _filename_date(fname) or datetime.fromtimestamp(path.stat().st_mtime)
-        mtime = path.stat().st_mtime
+        created = datetime.fromisoformat(node.created_at) if node.created_at else datetime.now()
+        days_old = _days_since(created) or 999.0
 
-        # Extract title from filename (after timestamp)
-        title = re.sub(r"^\d{4}[-_]\d{2}[-_]\d{2}[-_]\d{2}[-_]\d{2}[-_]\d{2}_?", "", fname)
-        title = title.replace(".txt", "").replace("_", " ").strip()
+        # Use summary as primary content, fall back to content
+        summary_text = node.summary or node.content[:300]
 
-        # Score importance from title + content keywords
-        importance = self._calc_importance(title, content)
+        # Determine cognitive_type from tags (cognitive: prefix) or infer
+        ctype = self._infer_type_from_tags(node.tags) or self._infer_type(node.title, summary_text)
 
-        # Tags from filename
-        tags = []
-        for kw in ["用户", "关系", "伙伴", "架构", "规划", "目标", "总结", "指南", "经验", "教训", "风险", "身份"]:
-            if kw in title:
-                tags.append(kw)
-
-        # Determine cognitive_type from title
-        ctype = self._infer_type(title, content)
+        # Calculate importance
+        importance = self._calc_importance(node.title, summary_text)
 
         return {
-            "_id": fname,
-            "_mtime": mtime,
-            "_created": created.isoformat() if hasattr(created, "isoformat") else str(created),
-            "_days_old": _days_since(created) or 999.0,
-            "summary": content[:300],
+            "_id": node.node_id,
+            "_mtime": 0.0,
+            "_created": node.created_at,
+            "_days_old": days_old,
+            "summary": summary_text[:300],
             "cognitive_type": ctype,
             "importance": importance,
-            "tags": tags,
-            "activation_keywords": self._extract_keywords(title, content),
-            "title": title,
+            "tags": list(node.tags),
+            "activation_keywords": self._extract_keywords(node.title, summary_text),
+            "title": node.title,
         }
 
-    def _parse_history_file(self, path: Path) -> List[Dict[str, Any]]:
-        """Parse a .agent_history JSON and extract user topics/decisions."""
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return []
-        msgs = data.get("messages", [])
-        if not msgs:
-            return []
-
-        updated = data.get("updated_at", "")
-        mtime = path.stat().st_mtime
-
-        entries = []
-        # Extract user messages as memory seeds
-        user_msgs = [m.get("content", "") for m in msgs if m.get("role") == "user" and m.get("content")]
-        # Take first and last meaningful user message
-        meaningful = [m for m in user_msgs if len(str(m).strip()) > 10]
-        if not meaningful:
-            return []
-
-        # Build one summary per session
-        first = str(meaningful[0])[:200]
-        last = str(meaningful[-1])[:200]
-
-        # Extract any tool calls/decisions from the session
-        decisions = []
-        for m in msgs:
-            if m.get("role") == "assistant" and "name" in str(m.get("content", "")):
-                content = str(m.get("content", ""))
-                # Look for tool call indicators
-                for keyword in ["决定", "使用", "load_module", "执行", "已完成"]:
-                    if keyword in content:
-                        decisions.append(content[:120])
-                        break
-
-        session_id = data.get("session_id", path.stem)
-        summary_text = f"会话 {session_id}: {first[:80]}"
-        if decisions:
-            summary_text += f" | 工具决策: {'; '.join(decisions[:3])}"
-
-        entries.append({
-            "_id": path.name,
-            "_mtime": mtime,
-            "_created": updated or datetime.fromtimestamp(mtime).isoformat(),
-            "_days_old": 0.0,  # fresh
-            "summary": summary_text[:300],
-            "cognitive_type": "history",
-            "importance": 0.5,  # history is moderate importance
-            "tags": ["history"],
-            "activation_keywords": self._tokenize(first)[:6],
-            "title": f"会话 {session_id}",
-        })
-
-        return entries
+    @staticmethod
+    def _infer_type_from_tags(tags: List[str]) -> Optional[str]:
+        """Check for cognitive:xxx tags to determine cognitive type."""
+        for tag in tags:
+            if tag.startswith("cognitive:"):
+                return tag[len("cognitive:"):]
+        return None
 
     # ── scoring ─────────────────────────────────────────────────
 

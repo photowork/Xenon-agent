@@ -177,10 +177,23 @@ class TaskChainToolManager:
         objective: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         steps: Optional[List[str]] = None,
+        force: bool = False,
     ) -> str:
         current = self._load_task()
         if current and current.get("status") == "in_progress":
-            return current["task_id"]
+            if not force:
+                # 描述一致 → 复用；描述不一致 → 警告并仍复用（避免静默覆盖）
+                if current.get("description") == description:
+                    return current["task_id"]
+                print(
+                    f"⚠ 检测到未完成任务「{current['description']}」"
+                    f"与当前请求「{description}」描述不一致"
+                )
+                print(f"  将复用现有任务，或使用 force=True 强制创建新任务（旧任务将被归档）")
+                return current["task_id"]
+            # force=True: 归档旧任务，创建新任务
+            print(f"  归档旧任务「{current['description']}」，创建新任务")
+            self.complete_task(f"被新任务替换: {description}")
 
         default_steps = steps or [
             "Analyze the request",
@@ -293,24 +306,33 @@ class TaskChainToolManager:
             return False
 
         task["updated_at"] = datetime.now().isoformat()
+
+        # current_step: 统一记录已完成的最大步骤 ID（0 表示无完成步骤）
         if status == "completed":
-            task["current_step"] = step_id
-            self._save_task(task)
-
-            # 🔁 自动检测：所有步骤已完成 → 自动归档关闭任务
-            all_done = all(s["status"] == "completed" for s in task["steps"])
-            if all_done and task.get("status") != "completed":
-                self.complete_task("所有步骤已完成，任务自动关闭。")
-                print(f"  ✓ 所有步骤已完成，任务 {task['task_id']} 已自动关闭")
-            else:
-                print(f"步骤 {step_id} 已更新: {status}")
-            return True
-
-        elif status == "in_progress" and task["current_step"] < step_id:
-            task["current_step"] = step_id - 1
+            if step_id > task.get("current_step", 0):
+                task["current_step"] = step_id
 
         self._save_task(task)
-        print(f"步骤 {step_id} 已更新: {status}")
+
+        # 步骤已终结 → 自动检测是否所有步骤均已终结，是则关闭任务
+        if status in ("completed", "failed", "skipped", "aborted"):
+            terminal_statuses = {"completed", "failed", "skipped", "aborted"}
+            all_terminal = all(s["status"] in terminal_statuses for s in task["steps"])
+            if all_terminal and task.get("status") != "completed":
+                has_failure = any(s["status"] in ("failed", "aborted") for s in task["steps"])
+                closure_reason = "所有步骤已终结"
+                if has_failure:
+                    failed_steps = [s["step_id"] for s in task["steps"] if s["status"] in ("failed", "aborted")]
+                    closure_reason += f"，但部分步骤存在异常（步骤 {failed_steps}）"
+                else:
+                    closure_reason += "，全部完成"
+                self.complete_task(closure_reason)
+                print(f"  ✓ 所有步骤已终结，任务 {task['task_id']} 已自动关闭")
+            else:
+                print(f"步骤 {step_id} 已更新: {status}")
+        else:
+            print(f"步骤 {step_id} 已更新: {status}")
+
         return True
 
     def mark_step_completed(self, step_id: int, notes: Optional[str] = None, output: Optional[str] = None) -> bool:
@@ -533,13 +555,34 @@ class TaskChainToolManager:
                 print(f"读取归档任务失败 {file}: {e}")
         return sorted(archived_tasks, key=lambda item: item.get("created_at", ""), reverse=True)
 
+    def format_pending_task_summary(self) -> Optional[str]:
+        """返回未完成任务的一句话摘要，适合注入到上下文提示词中供跨轮次感知。"""
+        task = self._load_task()
+        if not task or task.get("status") != "in_progress":
+            return None
+
+        completed = sum(1 for s in task["steps"] if s["status"] == "completed")
+        total = len(task["steps"])
+        next_step = self._get_next_step(task)
+        next_desc = next_step["description"] if next_step else "无"
+
+        return (
+            f"[未完成任务] {task['description']} "
+            f"({completed}/{total} 步完成, 下一步: {next_desc})"
+        )
+
     def clear_current_task(self) -> bool:
         try:
-            if self.current_task_file.exists():
+            if not self.current_task_file.exists():
+                return False
+            task = self._load_task()
+            if task:
+                # 先归档再删除，避免数据丢失
+                self._archive_task(task)
+            else:
                 self.current_task_file.unlink()
-                print("当前任务已清除")
-                return True
-            return False
+            print("当前任务已清除（已归档）")
+            return True
         except Exception as e:
             print(f"清除任务失败: {e}")
             return False

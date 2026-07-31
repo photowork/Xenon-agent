@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -89,8 +90,11 @@ def execute_tool_call(
                     "content": build_tool_execution_progress_message(tool_name, arguments),
                 }
             )
+        _start_time = time.perf_counter()
         result = execute_tool_fn(tool_name, arguments)
+        _elapsed = time.perf_counter() - _start_time
         result_text = str(result)
+        result_text += f"\n\n[⏱ 执行耗时: {_elapsed:.2f}s]"
         display_result_text = build_compact_tool_result_preview(tool_name, arguments, result)
         print_fn(f"\033[38;2;86;114;79m结果: \033[0m\033[38;2;86;114;79m{display_result_text}\033[0m\n")
 

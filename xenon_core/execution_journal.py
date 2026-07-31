@@ -7,9 +7,9 @@ from typing import Any, Dict, List, Optional
 
 
 class ExecutionJournal:
-    def __init__(self, journal_path: str = "Tasks/execution_journal.jsonl", max_recent: int = 80):
+    def __init__(self, journal_path: str = "Tasks/execution_journal.jsonl", max_entries: int = 20):
         self.journal_path = Path(journal_path)
-        self.max_recent = max_recent
+        self.max_entries = max_entries
         self.journal_path.parent.mkdir(parents=True, exist_ok=True)
 
     def log_planning(self, decision: Dict[str, Any], task_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -148,8 +148,35 @@ class ExecutionJournal:
         return "\n".join(lines)
 
     def _append(self, entry: Dict[str, Any]) -> None:
-        with open(self.journal_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        """追加条目并自动裁剪到 max_entries 条，防止文件无限增长。"""
+        # 读取现有条目
+        entries: List[Dict[str, Any]] = []
+        if self.journal_path.exists():
+            try:
+                with open(self.journal_path, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+            except (OSError, IOError):
+                entries = []
+
+        # 追加新条目
+        entries.append(entry)
+
+        # 只保留最后 max_entries 条
+        entries = entries[-self.max_entries:]
+
+        # 原子重写文件
+        tmp_path = self.journal_path.with_suffix(".jsonl.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            for e in entries:
+                handle.write(json.dumps(e, ensure_ascii=False) + "\n")
+        tmp_path.replace(self.journal_path)
 
     def _truncate(self, value: Any, max_chars: int = 1200) -> Any:
         if isinstance(value, (dict, list)):
@@ -188,7 +215,7 @@ class ExecutionJournal:
         self, task_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """获取最近的恢复检查点，可按 task_id 过滤。"""
-        entries = self.get_recent_entries(limit=self.max_recent)
+        entries = self.get_recent_entries(limit=self.max_entries)
         matching = [
             e for e in entries
             if e.get("entry_type") == "recovery_point"

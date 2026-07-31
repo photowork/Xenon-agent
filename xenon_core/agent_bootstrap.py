@@ -26,7 +26,7 @@ def build_core_management_tools() -> Dict[str, Dict[str, Any]]:
                         "module_names": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "要加载的模块名称列表，如 ['code_editor_handler', 'file_manager']",
+                            "description": "要加载的模块名称列表，如 ['code_editor_handler', 'terminal_handler']",
                         }
                     },
                     "required": ["module_names"],
@@ -155,6 +155,7 @@ def bootstrap_agent(
     agent._original_sigint_handler = None
     agent._in_api_call = False
     agent._tool_executing = False
+    agent._tool_call_depth = 0  # 单轮内工具调用递归深度计数器
     agent._pending_user_inputs = []
     agent._pending_user_input_limit = 8
     agent._autonomous_running = False

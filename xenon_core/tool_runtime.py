@@ -355,12 +355,32 @@ class ToolManager:
 
             # Phase 4 防御：过滤上下文压缩残留键，防止被错误传参
             clean_args = sanitize_tool_arguments_for_execution(tool_name, arguments or {})
+            # ── 终端工具安全截断：防止大输出淹没上下文 ──
+            if tool_name in (
+                "terminal_handler_Terminal_execute_command",
+                "terminal_handler_Terminal_execute_cmd_command",
+                "terminal_handler_Terminal_execute_powershell_command",
+            ):
+                clean_args.setdefault("max_output_lines", 200)
+                clean_args.setdefault("max_output_chars", 10000)
             result = getattr(manager, method_name)(**clean_args)
             logger.info(f"工具 {tool_name} 执行成功")
+            # ── 心跳统计：记录成功 ──
+            try:
+                from xenon_core.heartbeat import record_tool_success
+                record_tool_success()
+            except Exception:
+                pass
             return result
 
         except Exception as exc:
             logger.error(f"工具 {tool_name} 执行失败: {exc}")
+            # ── 心跳统计：记录失败 ──
+            try:
+                from xenon_core.heartbeat import record_tool_failure
+                record_tool_failure(str(exc))
+            except Exception:
+                pass
             raise
 
     def start_file_watcher(self):

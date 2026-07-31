@@ -211,11 +211,35 @@ def _repair_thinking_history(
     adding an empty field keeps the request shape compatible without deleting
     useful conversation context.
     """
+    # Find the boundary of the current round (everything after the last user
+    # message belongs to the current toolchain and must never be deleted).
+    current_round_start = -1
+    for idx in range(len(messages) - 1, -1, -1):
+        if messages[idx].get("role") == "user":
+            current_round_start = idx
+            break
+
     # Pass 1: identify tool_call_ids from broken assistant messages.
+    # Only repair messages BEFORE the current round — current-round messages
+    # are produced by this cycle and must be preserved.
     broken_tool_call_ids: Set[str] = set()
     broken_assistant_indices: Set[int] = set()
 
     for idx, message in enumerate(messages):
+        if idx > current_round_start:
+            # Current-round message: if broken, patch instead of deleting.
+            if (
+                message.get("role") == "assistant"
+                and message.get("tool_calls")
+                and not message.get("reasoning_content")
+            ):
+                logger.warning(
+                    "思考模式修复: 当前轮 assistant 消息缺少 reasoning_content，"
+                    "补齐空字段以保留消息 (idx=%d)", idx
+                )
+                message["reasoning_content"] = ""
+            continue
+
         if (
             message.get("role") == "assistant"
             and message.get("tool_calls")
@@ -245,7 +269,7 @@ def _repair_thinking_history(
     removed = len(messages) - len(repaired)
     if removed:
         logger.warning(
-            "思考模式修复: 移除 %d 条消息（缺少 reasoning_content 的工具链）",
+            "思考模式修复: 移除 %d 条消息（缺少 reasoning_content 的历史工具链）",
             removed,
         )
         messages.clear()

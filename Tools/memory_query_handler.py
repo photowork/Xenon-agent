@@ -20,7 +20,8 @@ HAS_EXISTING_MEMORY = True
 
 class MemoryQueryHandler:
     """记忆查询处理器基类"""
-    DEFAULT_MEMORY_DIR = "Memory/memory_Write"
+    _DEFAULT_MEMORY_DIR_PATH = Path(__file__).resolve().parent.parent / "Memory" / "memory_Write"
+    DEFAULT_MEMORY_DIR = str(_DEFAULT_MEMORY_DIR_PATH)
     DEFAULT_ENCODING = 'utf-8'
     
     def __init__(self, *_, **_compat_kwargs):
@@ -278,7 +279,8 @@ class SmartMemoryHandler(MemoryQueryHandler):
     EXECUTION_LOG_CLEANUP_INTERVAL_SECONDS = 3600
     
     def __init__(self, *_, enable_network: bool = False,
-                 execution_log_dir: str = None, **_compat_kwargs):
+                 execution_log_dir: str = None, model_path: str = None,
+                 **_compat_kwargs):
         super().__init__()
         
         self.enable_network = False
@@ -286,6 +288,8 @@ class SmartMemoryHandler(MemoryQueryHandler):
         self.tag_index = defaultdict(set)
         self.importance_threshold = 0.5
         self._last_execution_log_cleanup: Optional[datetime] = None
+        self._model_path = model_path
+        self._embedder = None
         
         # 执行日志目录：与记忆目录分离，避免污染记忆查询
         if execution_log_dir:
@@ -303,7 +307,32 @@ class SmartMemoryHandler(MemoryQueryHandler):
     def write_memory(self, content: str, summary: str = None,
                     encoding: str = 'utf-8', tags: List[str] = None) -> Dict[str, Any]:
         result = super().write_memory(content, summary, encoding)
-        
+
+        # ── 同步写入新分层记忆系统（MemoryAPI / 金字塔） ──
+        if result["success"]:
+            try:
+                import importlib
+                import xenon_core.memory_core.api as memory_api_module
+                importlib.reload(memory_api_module)
+                from xenon_core.memory_core.api import MemoryAPI
+                api = MemoryAPI()
+                api_result = api.write(
+                    content=content,
+                    summary=summary,
+                    tags=tags or [],
+                    source_type="tool_verified",
+                )
+                link_count = api_result.get("auto_links_created", 0)
+                result["memory_api_node_id"] = api_result.get("node_id")
+                result["memory_api_level"] = api_result.get("level")
+                result["memory_api_links"] = link_count
+            except Exception as e:
+                result["memory_api_sync"] = False
+                result["memory_api_sync_error"] = str(e)
+            else:
+                result["memory_api_sync"] = True
+
+        # ── 旧网络图构建（enable_network=False，默认关闭） ──
         if result["success"] and self.enable_network:
             try:
                 if tags is None:
@@ -481,8 +510,44 @@ class SmartMemoryHandler(MemoryQueryHandler):
     
     def search_memories(self, keyword: str, limit: int = 10, 
                        case_sensitive: bool = False,
-                       tags: List[str] = None) -> Dict[str, Any]:
+                       tags: List[str] = None,
+                       mode: str = "keyword") -> Dict[str, Any]:
         
+        # ── 语义搜索路径 ──
+        if mode in ("auto", "semantic"):
+            try:
+                from xenon_core.memory_core import MemoryAPI, EmbeddingService
+                model_path = self._model_path or r"D:\Xenon\agent_Xenon\models\bge-small-zh-v1.5"
+                embedder = EmbeddingService(model_path)
+                api = MemoryAPI(embedding_service=embedder)
+                result = api.search(keyword, limit=limit, mode="semantic")
+                if result["success"] and result["count"] > 0:
+                    return {
+                        "success": True,
+                        "search_type": "semantic_search",
+                        "source": "embedder",
+                        "keyword": keyword,
+                        "total_files_matched": result["count"],
+                        "matches": [
+                            {
+                                "node_id": r["node_id"],
+                                "title": r["title"],
+                                "summary": r["summary"],
+                                "level": r["level"],
+                                "level_name": r["level_name"],
+                                "score": r["score"],
+                                "tags": r.get("tags", []),
+                            }
+                            for r in result["results"]
+                        ],
+                        "message": f"语义搜索找到 {result['count']} 个相关记忆",
+                    }
+            except Exception as e:
+                if mode == "semantic":
+                    return {"success": False, "error": f"语义搜索失败: {str(e)}"}
+                # auto 模式降级到关键词搜索
+        
+        # ── 关键词 + 标签搜索（原有逻辑） ──
         if tags and self.enable_network:
             if keyword:
                 matches = []
@@ -918,7 +983,7 @@ class SmartMemoryHandler(MemoryQueryHandler):
         try:
             from xenon_core.cognitive_network import CognitiveNetworkState
 
-            builder = CognitiveNetworkState(memory_dir=str(self.memory_dir))
+            builder = CognitiveNetworkState()
             summary = builder.build_summary(current_query=current_query, max_nodes=limit)
             return {
                 "success": True,
@@ -942,7 +1007,7 @@ class SmartMemoryHandler(MemoryQueryHandler):
         try:
             from xenon_core.cognitive_network import CognitiveNetworkState
 
-            builder = CognitiveNetworkState(memory_dir=str(self.memory_dir))
+            builder = CognitiveNetworkState()
             summary = builder.build_phase_summary(
                 current_query=current_query,
                 current_phase=current_phase,
@@ -974,7 +1039,7 @@ class SmartMemoryHandler(MemoryQueryHandler):
         try:
             from xenon_core.cognitive_network import CognitiveNetworkState
 
-            builder = CognitiveNetworkState(memory_dir=str(self.memory_dir))
+            builder = CognitiveNetworkState()
             activation_set = builder.get_activation_set(
                 current_query=current_query,
                 current_phase=current_phase,
@@ -1382,9 +1447,10 @@ class SmartMemoryToolManager:
     
     def search_memories(self, keyword: str, limit: int = 10, 
                        case_sensitive: bool = False,
-                       tags: List[str] = None) -> Dict[str, Any]:
+                       tags: List[str] = None,
+                       mode: str = "keyword") -> Dict[str, Any]:
         handler = self._get_handler()
-        return handler.search_memories(keyword, limit, case_sensitive, tags)
+        return handler.search_memories(keyword, limit, case_sensitive, tags, mode)
     
     def write_memory(self, content: str, summary: str = None,
                     encoding: str = 'utf-8', tags: List[str] = None) -> Dict[str, Any]:
@@ -1463,6 +1529,54 @@ class SmartMemoryToolManager:
         handler = self._get_handler()
         return handler.delete_memory(filename)
 
+    def pyramid_drill_down(
+        self,
+        query: str = "",
+        node_id: str = "",
+        mode: str = "overview",
+        level: int = None,
+        max_results: int = 20,
+    ) -> Dict[str, Any]:
+        """沿金字塔层级下钻探索记忆网络（新分层记忆系统）。"""
+        try:
+            from xenon_core.memory_core.api import MemoryAPI
+            api = MemoryAPI()
+            return api.pyramid_drill_down(
+                query=query,
+                node_id=node_id,
+                mode=mode,
+                level=level,
+                max_results=max_results,
+            )
+        except ImportError:
+            return {
+                "success": False,
+                "error": "memory_core 模块不可用，金字塔下钻需要分层记忆系统支持",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"金字塔下钻异常: {str(e)}",
+            }
+
+    def repair_orphans(self, dry_run: bool = False) -> Dict[str, Any]:
+        """修复所有孤儿节点（无 parent_id 的节点），重建完整的金字塔父子链。"""
+        try:
+            from xenon_core.memory_core.api import MemoryAPI
+            api = MemoryAPI()
+            return api.repair_orphans(dry_run=dry_run)
+        except ImportError:
+            return {
+                "success": False,
+                "error": "memory_core 模块不可用",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"修复孤儿节点异常: {str(e)}",
+            }
+
+
 default_manager = SmartMemoryToolManager()
 
 def list_memories(limit: int = 20, sort_by: str = 'newest'):
@@ -1472,8 +1586,8 @@ def read_memory(filename: str, encoding: str = 'utf-8'):
     return default_manager.read_memory(filename, encoding)
 
 def search_memories(keyword: str, limit: int = 10, case_sensitive: bool = False, 
-                   tags: List[str] = None):
-    return default_manager.search_memories(keyword, limit, case_sensitive, tags)
+                   tags: List[str] = None, mode: str = "keyword"):
+    return default_manager.search_memories(keyword, limit, case_sensitive, tags, mode)
 
 def write_memory(content: str, summary: str = None, encoding: str = 'utf-8',
                 tags: List[str] = None):
@@ -1554,3 +1668,28 @@ def batch_delete_memories(filenames: List[str]):
 
 def delete_memory(filename: str):
     return default_manager.delete_memory(filename)
+
+# ============================================================
+# 金字塔下钻工具（委托给 memory_core 的 MemoryAPI）
+# ============================================================
+
+def pyramid_drill_down(
+    query: str = "",
+    node_id: str = "",
+    mode: str = "overview",
+    level: int = None,
+    max_results: int = 20,
+) -> Dict[str, Any]:
+    """沿金字塔层级下钻探索记忆网络（新分层记忆系统）。"""
+    return default_manager.pyramid_drill_down(
+        query=query,
+        node_id=node_id,
+        mode=mode,
+        level=level,
+        max_results=max_results,
+    )
+
+
+def repair_orphans(dry_run: bool = False) -> Dict[str, Any]:
+    """修复所有孤儿节点（无 parent_id），重建完整的金字塔父子链。"""
+    return default_manager.repair_orphans(dry_run=dry_run)

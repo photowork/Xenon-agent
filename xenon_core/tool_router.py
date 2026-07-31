@@ -16,109 +16,25 @@ class ToolRoute:
 
 
 class ToolRouter:
-    MODULE_RULES: Dict[str, Dict[str, List[str]]] = {
-        "file_manager": {
-            "keywords": ["file", "folder", "dir", "directory", "path", "search", "find", "locate", "list"],
-            "phases": ["analyze", "locate", "maintenance"],
-        },
-        "code_navigator": {
-            "keywords": ["code", "class", "function", "module", "structure", "入口", "导航", "scan"],
-            "phases": ["analyze", "locate", "debug"],
-        },
-        "code_editor_handler": {
-            "keywords": ["edit", "modify", "change", "fix", "patch", "write", "replace", "重构", "修改"],
-            "phases": ["edit", "debug"],
-        },
-        "terminal_handler": {
-            "keywords": ["run", "command", "shell", "powershell", "test", "build", "install", "执行"],
-            "phases": ["test", "debug", "deploy", "maintenance"],
-        },
-        "debug_handler": {
-            "keywords": ["debug", "trace", "breakpoint", "stack", "exception", "报错", "崩溃"],
-            "phases": ["debug", "test"],
-        },
-        "ssh_handler": {
-            "keywords": ["ssh", "remote", "server", "deploy", "sftp", "远程", "主机"],
-            "phases": ["deploy", "debug"],
-        },
-        "memory_query_handler": {
-            "keywords": ["memory", "recall", "remember", "history", "summary", "记忆"],
-            "phases": ["analyze", "reflect", "maintenance"],
-        },
-        "task_chain_handler": {
-            "keywords": ["task", "plan", "step", "progress", "workflow", "任务", "步骤"],
-            "phases": ["analyze", "reflect", "maintenance"],
-        },
-        "context_manager_tool": {
-            "keywords": ["context", "token", "summary", "compress", "上下文"],
-            "phases": ["analyze", "maintenance", "reflect"],
-        },
-        "txt_handler": {
-            "keywords": ["txt", "text", "note", "文档", "材料", "文本"],
-            "phases": ["analyze", "edit"],
-        },
-        "video_handler": {
-            "keywords": [
-                "video",
-                "audio",
-                "ffmpeg",
-                "clip",
-                "trim",
-                "split",
-                "merge",
-                "concat",
-                "thumbnail",
-                "gif",
-                "transcode",
-                "compress",
-                "extract audio",
-                "remove audio",
-                "剪视频",
-                "视频",
-                "音频",
-                "切分",
-                "分割",
-                "合并",
-                "拼接",
-                "混音",
-                "配音",
-                "转码",
-                "压缩",
-                "缩略图",
-            ],
-            "phases": ["analyze", "edit", "test", "maintenance"],
-        },
-        "solidworks_handler": {
-            "keywords": [
-                "solidworks",
-                "cad",
-                "sldprt",
-                "sldasm",
-                "slddrw",
-                "sketch",
-                "extrude",
-                "feature",
-                "dimension",
-                "三维建模",
-                "零件",
-                "装配体",
-                "工程图",
-                "草图",
-                "拉伸",
-                "特征",
-                "尺寸",
-            ],
-            "phases": ["analyze", "edit", "test", "maintenance"],
-        },
+    # ── 通用 phase 与模块名关键词的亲和度映射 ──
+    # 新增工具只要命名符合 {module}_{ToolName} 格式，就会自动被检测并评分
+    PHASE_MODULE_AFFINITY = {
+        "analyze": [
+            "code", "navigat", "search", "read", "view", "scan",
+            "memory", "context", "graph", "knowledge", "vecdb",
+            "query", "causal", "reasoner",
+        ],
+        "locate": ["navigat", "search", "find", "scan"],
+        "edit": ["edit", "write", "handler", "code", "replace", "create"],
+        "test": ["terminal", "run", "execut", "test", "simul"],
+        "debug": ["debug", "trace", "terminal", "code", "navigat", "exception"],
+        "deploy": ["ssh", "deploy", "remote", "sftp", "server", "git"],
+        "reflect": ["memory", "context", "skill", "soul", "knowledge", "causal"],
+        "maintenance": [
+            "context", "memory", "skill", "handler",
+            "wps", "word", "excel", "pdf", "packager",
+        ],
     }
-
-    DEFAULT_MODULES = [
-        "file_manager",
-        "code_navigator",
-        "code_editor_handler",
-        "terminal_handler",
-        "context_manager_tool",
-    ]
 
     VALID_PHASES = {"analyze", "locate", "edit", "test", "debug", "deploy", "reflect", "maintenance"}
     VALID_INTENTS = {
@@ -132,6 +48,83 @@ class ToolRouter:
     # 经验教训影响工具排序的惩罚/奖励分值
     LESSON_PENALTY_SCORE = -5      # 失败工具降权
     LESSON_BONUS_SCORE = 2         # 已验证替代工具升权
+
+    # ─────────────────────────────────────────────
+    #  动态模块发现（从 tool_schemas 提取）
+    # ─────────────────────────────────────────────
+
+    @staticmethod
+    def discover_all_modules(tool_schemas: List[dict]) -> List[str]:
+        """从 tool_schemas 动态发现所有可用模块名。
+
+        工具名格式: `{模块名}_{类名}_{方法名}`
+        类名首字母大写 (PascalCase)，通过检测第一个大写段来分割。
+        从第一个大写段之前提取模块名，支持多段模块名如 `code_editor_handler`。
+        """
+        modules: List[str] = []
+        for schema in tool_schemas or []:
+            tool_name = (schema.get("function", {}) or {}).get("name", "")
+            parts = tool_name.split("_")
+            # 找到第一个首字母大写的段 → 类名起点
+            class_idx = None
+            for i, part in enumerate(parts):
+                if part and part[0].isupper():
+                    class_idx = i
+                    break
+            if class_idx is not None and class_idx > 0:
+                module_name = "_".join(parts[:class_idx])
+            elif "_" in tool_name:
+                # 没有类名段时回退取第一段
+                module_name = tool_name.split("_", 1)[0]
+            else:
+                continue
+
+            if module_name and module_name not in modules:
+                modules.append(module_name)
+        return modules
+
+    # ─────────────────────────────────────────────
+    #  通用模块评分（无需为每个模块单独配置规则）
+    # ─────────────────────────────────────────────
+
+    def score_all_modules(
+        self,
+        tool_schemas: List[dict],
+        phase: str,
+        text: str,
+    ) -> Dict[str, int]:
+        """对所有发现的模块进行通用评分。
+
+        策略：
+        1. 模块名关键词 vs 当前 phase 亲和度
+        2. 模块名中的单词 vs 用户输入关键词匹配
+        """
+        scores: Dict[str, int] = {}
+        all_modules = self.discover_all_modules(tool_schemas)
+
+        for module_name in all_modules:
+            score = 0
+            lowered_module = module_name.lower()
+
+            # ── 1. phase 亲和度评分 ──
+            affinity_tokens = self.PHASE_MODULE_AFFINITY.get(phase, [])
+            if any(token in lowered_module for token in affinity_tokens):
+                score += 2
+
+            # ── 2. 模块名关键词匹配用户输入 ──
+            module_tokens = lowered_module.split("_")
+            for token in module_tokens:
+                if len(token) > 2 and token in text:
+                    score += 2
+
+            if score > 0:
+                scores[module_name] = score
+
+        return scores
+
+    # ─────────────────────────────────────────────
+    #  Phase / Intent 推断
+    # ─────────────────────────────────────────────
 
     def infer_phase(self, user_input: str, current_task: Optional[dict] = None) -> str:
         if current_task:
@@ -165,6 +158,10 @@ class ToolRouter:
             return "remote_operation"
         return "general_execution"
 
+    # ─────────────────────────────────────────────
+    #  路由主入口
+    # ─────────────────────────────────────────────
+
     def route(
         self,
         user_input: str,
@@ -177,22 +174,23 @@ class ToolRouter:
         rule_intent = self.infer_intent(user_input)
         text = (user_input or "").lower()
 
-        module_scores: Dict[str, int] = {}
-        for module_name, rule in self.MODULE_RULES.items():
-            score = 0
-            if rule_phase in rule["phases"]:
-                score += 2
-            score += sum(2 for keyword in rule["keywords"] if keyword.lower() in text)
-            if score > 0:
-                module_scores[module_name] = score
+        # ── 动态发现所有模块，通用评分 ──
+        module_scores = self.score_all_modules(
+            tool_schemas=tool_schemas,
+            phase=rule_phase,
+            text=text,
+        )
 
+        # 无匹配时回退到全量模块（给基础分 1，确保新工具也能出现）
         if not module_scores:
-            module_scores = {module: 1 for module in self.DEFAULT_MODULES}
+            all_modules = self.discover_all_modules(tool_schemas)
+            module_scores = {module: 1 for module in all_modules}
 
         # ── 经验教训影响模块排序 ──
         module_scores = self._apply_lesson_module_adjustments(
             module_scores=module_scores,
             recent_lessons=recent_lessons,
+            tool_schemas=tool_schemas,
         )
 
         rule_candidate_modules = [
@@ -209,7 +207,10 @@ class ToolRouter:
             (route_hint or {}).get("candidate_modules"),
             tool_schemas=tool_schemas,
         )
-        candidate_modules = self._merge_unique(hinted_modules, rule_candidate_modules, self.DEFAULT_MODULES)[:5]
+
+        # 兜底：全量发现的模块（动态，非硬编码）
+        all_modules = self.discover_all_modules(tool_schemas)
+        candidate_modules = self._merge_unique(hinted_modules, rule_candidate_modules, all_modules)[:5]
 
         rule_candidate_tools = self._pick_candidate_tools(
             candidate_modules=candidate_modules,
@@ -255,10 +256,15 @@ class ToolRouter:
             reasoning_summary=reasoning,
         )
 
+    # ─────────────────────────────────────────────
+    #  经验教训影响
+    # ─────────────────────────────────────────────
+
     def _apply_lesson_module_adjustments(
         self,
         module_scores: Dict[str, int],
         recent_lessons: Optional[List[Dict[str, Any]]],
+        tool_schemas: List[dict],
     ) -> Dict[str, int]:
         """基于经验教训调整模块评分：失败工具降权，替代工具升权。"""
         if not recent_lessons:
@@ -267,20 +273,15 @@ class ToolRouter:
         penalized_modules: set = set()
         boosted_modules: set = set()
 
+        # 从 tool_schemas 动态获取所有模块名（替代原先的 MODULE_RULES）
+        all_modules = self.discover_all_modules(tool_schemas)
+
         for lesson in recent_lessons:
             lesson_type = str(lesson.get("type", "")).strip()
             tool_name = str(lesson.get("tool_name", "")).strip()
 
-            # 失败教训 → 降低对应模块评分
-            if lesson_type == "tool_failure" and tool_name:
-                for module_name in self.MODULE_RULES:
-                    if tool_name.startswith(module_name + "_") or module_name in tool_name:
-                        penalized_modules.add(module_name)
-                        break
-
-            # 高失败率/阻塞重复 → 降低当前失败工具对应的模块
-            if lesson_type in ("high_failure_rate", "blockage_repeat") and tool_name:
-                for module_name in self.MODULE_RULES:
+            if lesson_type in ("tool_failure", "high_failure_rate", "blockage_repeat") and tool_name:
+                for module_name in all_modules:
                     if tool_name.startswith(module_name + "_") or module_name in tool_name:
                         penalized_modules.add(module_name)
                         break
@@ -289,7 +290,6 @@ class ToolRouter:
         for module_name in penalized_modules:
             if module_name in module_scores:
                 module_scores[module_name] = module_scores[module_name] + self.LESSON_PENALTY_SCORE
-                # 不要让分数低于 0
                 module_scores[module_name] = max(0, module_scores[module_name])
 
         # 对非惩罚模块升权（作为替代路径）
@@ -300,6 +300,10 @@ class ToolRouter:
                     boosted_modules.add(module_name)
 
         return module_scores
+
+    # ─────────────────────────────────────────────
+    #  工具评分与选择
+    # ─────────────────────────────────────────────
 
     def _pick_candidate_tools(
         self,
@@ -334,43 +338,6 @@ class ToolRouter:
                 for token in ["search", "find", "view", "read", "edit", "execute"]
                 if token in lowered and token in text
             )
-
-            # ── 经验教训影响工具评分 ──
-            if module_name == "video_handler":
-                if any(token in text for token in ["video", "audio", "视频", "音频", "剪视频"]):
-                    score += 2
-                if any(token in text for token in ["split", "cut", "trim", "切分", "分割", "剪"]):
-                    if any(token in lowered for token in ["split", "trim"]):
-                        score += 4
-                if any(token in text for token in ["merge", "concat", "combine", "合并", "拼接", "组合"]):
-                    if any(token in lowered for token in ["merge", "concat"]):
-                        score += 4
-                if any(token in text for token in ["mix", "dub", "voice", "audio", "混音", "配音", "音频"]):
-                    if "audio" in lowered:
-                        score += 4
-                if any(token in text for token in ["thumbnail", "cover", "缩略图", "封面"]):
-                    if "thumbnail" in lowered:
-                        score += 4
-                if "gif" in text and "gif" in lowered:
-                    score += 4
-
-            if module_name == "solidworks_handler":
-                solidworks_actions = {
-                    "sketch": ["create_sketch"],
-                    "草图": ["create_sketch"],
-                    "extrude": ["extrude_selected_sketch"],
-                    "拉伸": ["extrude_selected_sketch"],
-                    "feature": ["list_features"],
-                    "特征": ["list_features"],
-                    "dimension": ["get_dimension", "set_dimension"],
-                    "尺寸": ["get_dimension", "set_dimension"],
-                    "save": ["save"],
-                    "open": ["open"],
-                    "status": ["status"],
-                }
-                for keyword, preferred_names in solidworks_actions.items():
-                    if keyword in text and any(name in lowered for name in preferred_names):
-                        score += 5
 
             if recent_lessons:
                 score = self._apply_lesson_tool_score(tool_name, score, recent_lessons)
@@ -409,6 +376,10 @@ class ToolRouter:
                     base_score += self.LESSON_PENALTY_SCORE
 
         return max(0, base_score)
+
+    # ─────────────────────────────────────────────
+    #  工具名 ↔ 模块名 映射
+    # ─────────────────────────────────────────────
 
     @staticmethod
     def _match_module(tool_name: str, candidate_modules: List[str]) -> Optional[str]:

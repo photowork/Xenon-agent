@@ -7,6 +7,23 @@ from typing import Any, Callable, Dict, Optional, Sequence, Type
 from xenon_core.boot_report import render_cli_startup_report
 from xenon_core.runtime_health import collect_runtime_health
 
+# 重启信号检测（由 restart_handler 在 restart_self() 时设置）
+# 用函数动态查询，避免 import 时复制变量值导致看不到实时变化
+try:
+    import Tools.restart_handler as _restart_mod
+
+    def _restart_signal_active() -> bool:
+        return _restart_mod._restart_requested
+
+    def _clear_restart_signal() -> None:
+        _restart_mod._clear_restart_signal()
+except ImportError:
+    def _restart_signal_active() -> bool:
+        return False
+
+    def _clear_restart_signal() -> None:
+        pass
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_INPUT_PROMPT = "\033[38;2;247;154;215m你: \033[0m\033[38;2;247;154;215m"
@@ -96,6 +113,12 @@ def run_interactive_agent_session(
                 # ────────────────────────────────────────────────
 
                 agent.chat(user_input)
+
+                # ── 检查重启信号（由 restart_handler.restart_self() 设置）──
+                if _restart_signal_active():
+                    _clear_restart_signal()
+                    print_fn("\n\033[38;2;211;161;83m[重启] 正在退出，等待新实例启动...\033[0m")
+                    break
 
             except KeyboardInterrupt:
                 print_fn("\n")

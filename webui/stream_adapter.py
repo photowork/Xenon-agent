@@ -3,6 +3,7 @@ import json
 import io
 import asyncio
 import copy
+import logging
 import os
 import threading
 import time
@@ -10,6 +11,8 @@ import traceback
 from queue import Queue, Empty
 from typing import Dict, List, Any, Generator, Optional, Callable
 from contextlib import redirect_stdout, redirect_stderr
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 
 
@@ -59,13 +62,30 @@ class AIAgentStreamAdapter:
         with self._state_lock:
             worker_thread = self._active_worker_thread
 
-        if worker_thread is None or not worker_thread.is_alive():
+        if worker_thread is not None and worker_thread.is_alive():
+            self.interrupt()
+            worker_thread.join(timeout=STREAM_WORKER_JOIN_SECONDS)
+            if worker_thread.is_alive():
+                raise RuntimeError("Previous chat stream is still shutting down. Please retry shortly.")
             return
 
-        self.interrupt()
-        worker_thread.join(timeout=STREAM_WORKER_JOIN_SECONDS)
-        if worker_thread.is_alive():
-            raise RuntimeError("Previous chat stream is still shutting down. Please retry shortly.")
+        # ★ 兜底：即使线程引用丢失，如果 agent 仍在处理中（_turn_running=True），
+        # 也拒绝启动新 worker，防止两个 chat 线程同时操作同一个 agent
+        if getattr(self.agent, '_turn_running', False):
+            self.agent.interrupted = True
+            # 走到这里说明 worker 线程引用已死（或不存在）。_turn_running 正常由
+            # worker 线程的 finally 重置，线程死亡即标志复位；若标志仍为 True，
+            # 属于异常路径的残留状态。短暂等待后强制复位实现自愈，
+            # 避免用户被永久卡在 "still processing" 只能重启程序。
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and getattr(self.agent, '_turn_running', False):
+                time.sleep(0.05)
+            if getattr(self.agent, '_turn_running', False):
+                logger.warning(
+                    "[stream_adapter] _turn_running stale with no live worker thread; "
+                    "force-resetting to allow a new stream"
+                )
+                self.agent._turn_running = False
 
     def _capture_context_snapshot(self):
         context = copy.deepcopy(getattr(self.agent, "current_context", []))
@@ -89,7 +109,11 @@ class AIAgentStreamAdapter:
     def _clear_active_state(self, event_queue, stop_event, worker_thread=None):
         with self._state_lock:
             if worker_thread is not None and self._active_worker_thread is worker_thread:
-                self._active_worker_thread = None
+                # ★ 关键修复：如果工作线程还活着（被阻塞在工具调用中），
+                # 不要清除引用。否则后续请求会认为没有活跃 worker，
+                # 创建重叠的 chat 线程，导致状态混乱。
+                if not worker_thread.is_alive():
+                    self._active_worker_thread = None
             if self._active_queue is event_queue:
                 self._active_queue = None
             if self._active_stop_event is stop_event:
@@ -98,7 +122,13 @@ class AIAgentStreamAdapter:
     def has_pending_worker(self) -> bool:
         with self._state_lock:
             worker_thread = self._active_worker_thread
-        return worker_thread is not None and worker_thread.is_alive()
+        if worker_thread is not None and worker_thread.is_alive():
+            return True
+        # ★ 兜底：即使线程引用丢失，如果 agent 内部仍在处理（_turn_running），
+        # 也视为有活跃 worker，防止创建重叠的 chat 线程
+        if getattr(self.agent, '_turn_running', False):
+            return True
+        return False
 
     def wait_for_worker(self, timeout: Optional[float] = None) -> bool:
         with self._state_lock:
@@ -112,9 +142,15 @@ class AIAgentStreamAdapter:
         return True
     
     def stream_chat(self, user_input: str) -> Generator[StreamEvent, None, None]:
+        logger.info(
+            "[stream_adapter] stream_chat starting, user_input=%r, agent.interrupted=%s",
+            user_input[:80], getattr(self.agent, "interrupted", None),
+        )
         self._ensure_no_active_worker()
+        # ★ 重置中断标志：确保上一轮残留的 interrupted=True 不会让新流的生成器循环立即 break
+        self.agent.interrupted = False
         yield StreamEvent(type='user', content=user_input)
-        
+
         event_queue: Queue = Queue()
         stop_event = threading.Event()
         context_snapshot, full_context_snapshot = self._capture_context_snapshot()
@@ -141,6 +177,8 @@ class AIAgentStreamAdapter:
         self.last_message_count = len(self.agent.current_context)
         
         def run_chat():
+            logger.info("[stream_adapter] chat thread starting for user_input=%r", user_input[:80])
+            chat_start = time.monotonic()
             try:
                 self.agent.chat(user_input)
             except Exception as e:
@@ -151,6 +189,11 @@ class AIAgentStreamAdapter:
                     event_queue.put(StreamEvent(type='error', content=str(e), error=str(e)))
                     print(f"Chat error: {e}\n{error_traceback}", file=sys.stderr)
             finally:
+                chat_elapsed = time.monotonic() - chat_start
+                logger.info(
+                    "[stream_adapter] chat thread finished, elapsed=%.1fs, stop_event=%s, agent.interrupted=%s",
+                    chat_elapsed, stop_event.is_set(), getattr(self.agent, "interrupted", None),
+                )
                 if stop_event.is_set():
                     self._restore_context_snapshot(context_snapshot, full_context_snapshot)
                 event_queue.put(None)
@@ -164,8 +207,15 @@ class AIAgentStreamAdapter:
         try:
             last_activity = time.monotonic()
             last_heartbeat = last_activity
+            event_count = 0
+            heartbeat_count = 0
             while True:
                 if stop_event.is_set() or getattr(self.agent, "interrupted", False):
+                    logger.warning(
+                        "[stream_adapter] generator loop breaking: stop_event=%s, interrupted=%s, events=%d, heartbeats=%d",
+                        stop_event.is_set(), getattr(self.agent, "interrupted", None),
+                        event_count, heartbeat_count,
+                    )
                     break
 
                 try:
@@ -176,6 +226,11 @@ class AIAgentStreamAdapter:
                         STREAM_IDLE_TIMEOUT_SECONDS
                         and now - last_activity >= STREAM_IDLE_TIMEOUT_SECONDS
                     ):
+                        logger.error(
+                            "[stream_adapter] IDLE TIMEOUT after %.0fs (limit=%.0fs), events=%d, heartbeats=%d",
+                            now - last_activity, STREAM_IDLE_TIMEOUT_SECONDS,
+                            event_count, heartbeat_count,
+                        )
                         self.agent.interrupted = True
                         yield StreamEvent(
                             type='error',
@@ -190,19 +245,36 @@ class AIAgentStreamAdapter:
                         and now - last_heartbeat >= STREAM_HEARTBEAT_SECONDS
                     ):
                         last_heartbeat = now
+                        last_activity = now  # ★ 心跳也是一种活动，防止误触发空闲超时
+                        heartbeat_count += 1
                         yield StreamEvent(type='heartbeat')
                     continue
 
                 if event is None:
+                    logger.info(
+                        "[stream_adapter] received None sentinel, events=%d, heartbeats=%d",
+                        event_count, heartbeat_count,
+                    )
                     break
                 last_activity = time.monotonic()
+                event_count += 1
+                if event.type == 'heartbeat':
+                    heartbeat_count += 1
                 yield event
             
             self.last_message_count = len(self.agent.current_context)
             
+            logger.info(
+                "[stream_adapter] generator yielding done, events=%d, heartbeats=%d",
+                event_count, heartbeat_count,
+            )
             yield StreamEvent(type='done')
         except GeneratorExit:
             # 生成器被外部关闭
+            logger.warning(
+                "[stream_adapter] GeneratorExit (SSE connection likely dropped), events=%d, heartbeats=%d",
+                event_count, heartbeat_count,
+            )
             self.agent.interrupted = True
             stop_event.set()
             event_queue.put(None)
@@ -213,10 +285,9 @@ class AIAgentStreamAdapter:
             if chat_thread.is_alive():
                 # 线程在超时后仍存活 — 仍清除状态以避免阻塞后续请求
                 # agent.interrupted 标志已设置，旧 chat 应自行中止
-                print(
-                    f"Warning: chat thread still alive after {STREAM_WORKER_JOIN_SECONDS}s join, "
-                    "releasing active state anyway",
-                    file=sys.stderr,
+                logger.warning(
+                    "[stream_adapter] chat thread STILL ALIVE after %.0fs join, releasing state anyway",
+                    STREAM_WORKER_JOIN_SECONDS,
                 )
             self._clear_active_state(event_queue, stop_event, chat_thread)
     

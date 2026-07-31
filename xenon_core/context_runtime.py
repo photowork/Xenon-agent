@@ -15,10 +15,9 @@ MAX_CONTEXT_TOKENS_DEFAULT = 50000
 OUTPUT_TOKEN_RESERVE = 8000
 TIKTOKEN_AVAILABLE = tiktoken is not None
 
-# DeepSeek V3 tokenizer 路径（位于 xenon_core 根目录）
+# DeepSeek V3 tokenizer 路径（相对于本文件所在目录）
 _DEFAULT_DS_TOKENIZER_PATH = (
-    Path(__file__).resolve().parent
-    / "tokenizer.json"
+    Path(__file__).resolve().parent / "tokenizer.json"
 )
 
 
@@ -85,7 +84,7 @@ class TokenCounter:
         if self._ds_tokenizer is not None:
             return len(self._ds_tokenizer.encode(text).ids)
         if self.encoder is not None:
-            return len(self.encoder.encode(text))
+            return len(self.encoder.encode(text, disallowed_special=()))
         return 0
 
     def estimate_context_tokens(
@@ -139,10 +138,6 @@ class TokenCounter:
         total = 0
         for message in messages:
             total += self.estimate_messages_tokens([message])
-            if message.get("tool_calls"):
-                for tool_call in message["tool_calls"]:
-                    tool_call_str = json.dumps(tool_call, ensure_ascii=False)
-                    total += self.count_tokens(tool_call_str)
         if tools:
             tools_str = json.dumps(tools, ensure_ascii=False)
             total += self.count_tokens(tools_str)

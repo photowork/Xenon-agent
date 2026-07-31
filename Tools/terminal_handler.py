@@ -211,7 +211,7 @@ class TerminalHandler:
         max_output_lines: int = 160,
         max_output_chars: int = 20000,
     ) -> Dict[str, Any]:
-        """统一格式化输出结果"""
+        """统一格式化输出结果，支持行数和字符数截断"""
         if not result.get("success"):
             return {
                 **result,
@@ -226,8 +226,29 @@ class TerminalHandler:
         stdout = self._clean_output(stdout_raw)
         stderr = self._clean_output(stderr_raw)
         
+        # ---- 截断逻辑 ----
+        truncated = False
+        
+        # 先按字符数截断
+        if max_output_chars > 0 and len(stdout) > max_output_chars:
+            truncated = True
+            stdout = stdout[:max_output_chars] + f"\n... [截断: 输出超过 {max_output_chars} 字符限制]"
+        
+        if max_output_chars > 0 and len(stderr) > max_output_chars:
+            stderr = stderr[:max_output_chars] + f"\n... [截断: 错误输出超过 {max_output_chars} 字符限制]"
+        
         output_lines = stdout.split('\n') if stdout else []
         error_lines = stderr.split('\n') if stderr else []
+        
+        # 再按行数截断
+        if max_output_lines > 0 and len(output_lines) > max_output_lines:
+            truncated = True
+            output_lines = output_lines[:max_output_lines]
+            output_lines.append(f"... [截断: 输出超过 {max_output_lines} 行限制]")
+        
+        if max_output_lines > 0 and len(error_lines) > max_output_lines:
+            error_lines = error_lines[:max_output_lines]
+            error_lines.append(f"... [截断: 错误输出超过 {max_output_lines} 行限制]")
         
         command_succeeded = exit_code == 0
         status_msg = "成功" if command_succeeded else f"失败(退出码: {exit_code})"
@@ -242,6 +263,7 @@ class TerminalHandler:
             "execution_time": result.get("execution_time", 0),
             "output_lines": len(output_lines),
             "error_lines": len(error_lines),
+            "truncated": truncated,
             "message": f"{command_type}执行{status_msg} | 耗时: {result.get('execution_time', 0):.2f}秒"
         }
 

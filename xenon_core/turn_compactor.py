@@ -48,21 +48,76 @@ _TOOL_EVIDENCE_USER_RE = re.compile(
 _TOOL_ACTION_CLAIM_RE = re.compile(
     r"(?i)(?:"
     r"\b(?:git|pytest|curl|pip|npm)\b|"
-    r"(?:让我|我先|我来|现在我|先运行|运行一下|直接测试|测试API|读取|查看|检查|修改|修复|写入|保存|创建|执行|运行|命令|已成功|成功读取|已经读取|已修改|已写入|诊断日志|搞定|ran|tested|read|checked|modified|wrote|saved|created|installed)"
+    r"(?:让我|我先|我来|现在我|先运行|运行一下|直接测试|测试API|执行命令|运行命令|命令执行|命令运行|"
+    r"已成功|成功读取|已经读取|已读取|已查看|已检查|已修改|已修复|已写入|已保存|已创建|已执行|已运行|"
+    r"已经查看|已经检查|已经修改|已经修复|已经写入|已经保存|已经创建|已经执行|已经运行|"
+    r"检查完|读取完|查看完|修改完|修复完|写入完|保存完|创建完|测试通过|诊断日志|搞定|"
+    r"ran|tested|read|checked|modified|wrote|saved|created|installed)"
     r")"
 )
 
+_TOOL_ACTION_CLAIM_MAX_CHARS = 180
+_TOOL_ACTION_CLAIM_MAX_NONEMPTY_LINES = 3
+
 _CHECKPOINT_SYSTEM_PREFIX = "【任务状态检查点】"
+_QUESTION_TIMESTAMP_PREFIX = "提问时间："
+_ANSWER_TIMESTAMP_PREFIX = "回答完成时间："
+TIMESTAMP_SYSTEM_PREFIXES = (_QUESTION_TIMESTAMP_PREFIX, _ANSWER_TIMESTAMP_PREFIX)
 _CONCEPTUAL_USER_RE = re.compile(r"(?i)(?:如何|怎么|怎样|为什么|解释|说明|\bhow\b|\bwhy\b|\bwhat\b|\bexplain\b)")
+
+
+def _is_checkpoint_system_message(message: dict) -> bool:
+    return (
+        message.get("role") == "system"
+        and str(message.get("content", "")).startswith(_CHECKPOINT_SYSTEM_PREFIX)
+    )
+
+
+def _is_timestamp_system_message(message: dict) -> bool:
+    """识别随轮次沉淀的时间戳 system 消息（提问时间/回答完成时间）。
+
+    这类消息需要像 user/assistant 一样随轮次保留在历史中，
+    让模型能感知整段时间的流动，而不是只看到当轮时间。
+    """
+    return (
+        message.get("role") == "system"
+        and str(message.get("content", "")).startswith(TIMESTAMP_SYSTEM_PREFIXES)
+    )
+
+
+def _find_turn_timestamps(
+    messages: list[dict], last_user_index: int, last_assistant_index: int
+) -> Tuple[str, str]:
+    """提取当轮的提问时间（紧贴最后一条 user 之前）与回答完成时间（最后一条 assistant 之后）。"""
+    question_timestamp = ""
+    if last_user_index > 0:
+        before = messages[last_user_index - 1]
+        if before.get("role") == "system" and str(before.get("content", "")).startswith(
+            _QUESTION_TIMESTAMP_PREFIX
+        ):
+            question_timestamp = str(before.get("content", ""))
+
+    answer_timestamp = ""
+    if last_assistant_index >= 0:
+        for message in messages[last_assistant_index + 1 :]:
+            if message.get("role") == "system" and str(message.get("content", "")).startswith(
+                _ANSWER_TIMESTAMP_PREFIX
+            ):
+                answer_timestamp = str(message.get("content", ""))
+                break
+
+    return question_timestamp, answer_timestamp
 
 
 def compact_turn_for_next_context(turn_messages: list[dict]) -> list[dict]:
     """
     输入：当前轮完整 live_messages
-    输出：下一轮允许携带的极简消息，只保留用户提问和最终成果回复
+    输出：下一轮允许携带的极简消息，只保留用户提问和最终成果回复；
+    若当轮带有提问时间/回答完成时间 system 消息，一并保留，
+    让时间戳随轮次在历史中沉淀（模型由此感知时间流动）。
     """
     user_content, last_user_index = _find_last_message_content(turn_messages, "user")
-    assistant_content, _ = _find_last_assistant_content(turn_messages)
+    assistant_content, last_assistant_index = _find_last_assistant_content(turn_messages)
     has_tool_evidence = _has_tool_evidence(turn_messages, start_index=last_user_index)
 
     if _assistant_content_too_short(assistant_content):
@@ -75,18 +130,32 @@ def compact_turn_for_next_context(turn_messages: list[dict]) -> list[dict]:
     ):
         assistant_content = ""
 
+    question_timestamp, answer_timestamp = _find_turn_timestamps(
+        turn_messages, last_user_index, last_assistant_index
+    )
+
     compact_messages: List[Dict[str, str]] = []
+    if question_timestamp and (user_content or assistant_content):
+        compact_messages.append({"role": "system", "content": question_timestamp})
     if user_content:
         compact_messages.append({"role": "user", "content": user_content})
     if assistant_content:
         compact_messages.append({"role": "assistant", "content": assistant_content})
+    if answer_timestamp and (user_content or assistant_content):
+        compact_messages.append({"role": "system", "content": answer_timestamp})
     return compact_messages
 
 
 def compact_history_for_next_context(messages: list[dict]) -> list[dict]:
-    """Compact a restored display transcript into API-safe turn summaries."""
+    """Compact a restored display transcript into API-safe turn summaries.
+
+    提问时间/回答完成时间 system 消息随各自轮次保留：
+    - 提问时间属于"下一轮"，暂存后挂到下一条 user 所在轮的轮首；
+    - 回答完成时间属于"当前轮"，并入当前轮消息序列，flush 时归位到轮尾。
+    """
     compact_messages: List[Dict[str, str]] = []
     current_turn: List[dict] = []
+    pending_question_timestamp = ""
 
     for message in messages or []:
         if not isinstance(message, dict):
@@ -97,12 +166,24 @@ def compact_history_for_next_context(messages: list[dict]) -> list[dict]:
             content = _content_to_text(message.get("content", "")).strip()
             if content.startswith(_CHECKPOINT_SYSTEM_PREFIX):
                 compact_messages.append({"role": "system", "content": content})
+                continue
+            if content.startswith(_QUESTION_TIMESTAMP_PREFIX):
+                pending_question_timestamp = content
+                continue
+            if content.startswith(_ANSWER_TIMESTAMP_PREFIX):
+                if current_turn:
+                    current_turn.append({"role": "system", "content": content})
+                else:
+                    compact_messages.append({"role": "system", "content": content})
             continue
 
         if role == "user":
             if current_turn:
                 compact_messages.extend(compact_turn_for_next_context(current_turn))
             current_turn = [message]
+            if pending_question_timestamp:
+                current_turn.insert(0, {"role": "system", "content": pending_question_timestamp})
+                pending_question_timestamp = ""
             continue
 
         if role in {"assistant", "tool"} and current_turn:
@@ -167,21 +248,38 @@ def sanitize_messages_for_api(
 
 
 def trim_compact_history(messages: list[dict], max_turns: int) -> list[dict]:
+    """裁剪紧凑历史：检查点 system 前置保留，正文按 user 轮次保留最近 max_turns 轮。
+
+    轮内的提问时间/回答完成时间 system 消息随轮次一并保留（保持时间线交错结构），
+    不再把所有非检查点 system 消息一刀切掉。
+    """
     if max_turns <= 0:
         return []
 
     state_messages = [
-        copy.deepcopy(message)
-        for message in messages
-        if message.get("role") == "system"
-        and str(message.get("content", "")).startswith("【任务状态检查点】")
+        copy.deepcopy(message) for message in messages if _is_checkpoint_system_message(message)
     ]
-    compact_messages = [
-        copy.deepcopy(message)
-        for message in messages
-        if message.get("role") in {"user", "assistant"}
+    body_messages = [
+        copy.deepcopy(message) for message in messages if not _is_checkpoint_system_message(message)
     ]
-    return state_messages + compact_messages[-max_turns * 2 :]
+
+    user_seen = 0
+    cut_index = 0
+    for index in range(len(body_messages) - 1, -1, -1):
+        if body_messages[index].get("role") == "user":
+            user_seen += 1
+            if user_seen == max_turns:
+                cut_index = index
+                break
+
+    # 紧贴这轮 user 之前的提问时间 system 消息一并纳入保留范围
+    # （只认提问时间前缀，避免把上一轮的回答完成时间也带进来）
+    while cut_index > 0 and body_messages[cut_index - 1].get("role") == "system" and str(
+        body_messages[cut_index - 1].get("content", "")
+    ).startswith(_QUESTION_TIMESTAMP_PREFIX):
+        cut_index -= 1
+
+    return state_messages + body_messages[cut_index:]
 
 
 def _find_last_message_content(messages: list[dict], role: str) -> Tuple[str, int]:
@@ -275,7 +373,17 @@ def _turn_needs_tool_evidence(user_content: str) -> bool:
 
 
 def _looks_like_tool_action_claim(assistant_content: str) -> bool:
-    return bool(_TOOL_ACTION_CLAIM_RE.search(assistant_content or ""))
+    text = _content_to_text(assistant_content).strip()
+    if not text:
+        return False
+    if len(text) > _TOOL_ACTION_CLAIM_MAX_CHARS:
+        return False
+
+    nonempty_lines = [line for line in text.splitlines() if line.strip()]
+    if len(nonempty_lines) > _TOOL_ACTION_CLAIM_MAX_NONEMPTY_LINES:
+        return False
+
+    return bool(_TOOL_ACTION_CLAIM_RE.search(text))
 
 
 def _parse_payload(value: Any) -> Any:

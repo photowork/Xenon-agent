@@ -73,8 +73,8 @@ def infer_semantic_route(
         "Return JSON only with keys: phase, intent, candidate_modules, candidate_tools, confidence, reasoning.\n"
         "Valid phases: analyze, locate, edit, test, debug, deploy, reflect, maintenance.\n"
         "Valid intents: general_execution, fix_and_verify, integrate_change, analyze_codebase, remote_operation.\n"
-        "Prefer code_editor_handler for editing files, code_navigator for reading code, "
-        "terminal_handler for running commands, debug_handler for debugging, file_manager for filesystem work.\n"
+        "Prefer code_editor_handler for both editing and navigating code, "
+        "terminal_handler for running commands, debug_handler for debugging, code_editor_handler for filesystem work.\n"
         "Do not invent modules or tools outside the provided catalog."
     )
     user_prompt = (

@@ -133,6 +133,14 @@ class AgentOrchestrator:
             or route.phase
             or "plan"
         )
+        # 🎯 Auto-advance phase: plan → act after first successful tool call.
+        # Without this, execution_state["phase"] stays "plan" forever,
+        # router keeps returning "analyze" mode (view/search/scan…),
+        # and the model is trapped in plan→view→plan→view→… ♾️
+        if phase_source == "plan" and last_result is not None:
+            if last_result.get("success", True):
+                phase_source = "act"
+                execution_state["phase"] = "act"
         phase_state = normalize_phase_state(
             phase_source,
             raw_recovery_mode or execution_state.get("recovery_mode"),

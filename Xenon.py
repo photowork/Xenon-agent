@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Union, Tuple
 
-__version__ = "0.4.0"
+__version__ = "0.4.5"
 APP_VERSION = __version__
 
 from xenon_core.cognitive_network import CognitiveNetworkState
@@ -39,6 +39,7 @@ from xenon_core.context_runtime import (
 from xenon_core.chat_entry import handle_user_chat_entry as core_handle_user_chat_entry
 from xenon_core.cli_runtime import run_interactive_agent_session
 from xenon_core.chat_runtime import run_chat_cycle as core_run_chat_cycle
+from xenon_core.model_request import build_chat_completion_kwargs
 from xenon_core.cognitive_signal_runtime import (
     get_cognitive_network_summary as core_get_cognitive_network_summary,
     inject_cognitive_network_summary as core_inject_cognitive_network_summary,
@@ -58,6 +59,7 @@ from xenon_core.runtime_control import (
     retry_request as core_retry_request,
     setup_signal_handler as core_setup_signal_handler,
 )
+from xenon_core.recursion_detector import RecursionDetector
 from xenon_core.context_tooling import handle_context_manager_tool_call as core_handle_context_manager_tool_call
 from xenon_core.context_trim import (
     auto_trim_context as core_auto_trim_context,
@@ -68,6 +70,7 @@ from xenon_core.orchestration_runtime import (
 )
 from xenon_core.prompt_runtime import (
     build_available_tools_message as core_build_available_tools_message,
+    build_runtime_system_messages as core_build_runtime_system_messages,
     build_system_prompt as core_build_system_prompt,
     load_prompts as core_load_prompts,
 )
@@ -107,6 +110,7 @@ from xenon_core.tool_payload_runtime import (
     summarize_tool_payload_for_context as core_summarize_tool_payload_for_context,
 )
 from xenon_core.turn_compactor import (
+    TIMESTAMP_SYSTEM_PREFIXES as CORE_TIMESTAMP_SYSTEM_PREFIXES,
     compact_history_for_next_context as core_compact_history_for_next_context,
     compact_turn_for_next_context as core_compact_turn_for_next_context,
     sanitize_messages_for_api as core_sanitize_messages_for_api,
@@ -178,6 +182,7 @@ except ImportError:
 MAX_RETRY_ATTEMPTS = 3
 NETWORK_RETRY_DELAY = 2
 API_TIMEOUT = 120  # API 请求超时时间（秒）
+MAX_TOOL_RECURSION_DEPTH = 100  # 单轮内工具递归调用上限，超过后注入提醒但继续执行
 
 ENABLE_STREAMING = True  # 是否启用流式响应
 ENABLE_THINKING_MODE = getattr(deepseek_config, "ENABLE_THINKING_MODE", True)  # 使用 DeepSeek thinking 开关
@@ -324,6 +329,8 @@ class AIAgent:
         self._last_request_estimated_tokens = None
         self._last_api_total_tokens = None
         self._last_live_context_status = None
+        self._tool_cycle_count = 0  # 单轮内工具递归循环计数器（替代旧指纹检测器）
+        self._recursion_detector = RecursionDetector(threshold=3)  # 内容指纹检测器
 
     def set_model(self, model: str) -> str:
         if model not in AVAILABLE_MODELS:
@@ -521,7 +528,7 @@ class AIAgent:
             trace_dir=TRACE_LOG_DIR,
             logger=logger,
             metadata={"active_user_input": getattr(self, "_active_user_input", "")},
-            max_files=100,
+            max_files=20,
         )
 
     def _compact_turn_for_next_context(self, turn_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -558,8 +565,18 @@ class AIAgent:
 
     @staticmethod
     def _compact_history_messages_only(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        # user/assistant 之外，额外保留提问时间/回答完成时间 system 消息，
+        # 让时间戳随轮次沉淀在持久历史中（模型据此感知时间流动）。
         return copy.deepcopy(
-            [message for message in messages if message.get("role") in {"user", "assistant"}]
+            [
+                message
+                for message in messages
+                if message.get("role") in {"user", "assistant"}
+                or (
+                    message.get("role") == "system"
+                    and str(message.get("content", "")).startswith(CORE_TIMESTAMP_SYSTEM_PREFIXES)
+                )
+            ]
         )
 
     @staticmethod
@@ -667,6 +684,13 @@ class AIAgent:
             execution_journal=self.execution_journal,
             set_orchestration_decision_fn=lambda decision: setattr(self, "orchestration_decision", decision),
             logger=logger,
+            get_semantic_route_hint_fn=lambda user_input, tool_schemas, current_task: (
+                self._infer_semantic_route(
+                    user_input=user_input,
+                    tool_schemas=tool_schemas,
+                    current_task=current_task,
+                )
+            ),
         )
 
     def _record_tool_outcome(
@@ -1047,7 +1071,15 @@ class AIAgent:
                 filtered.append(tool)
         return filtered
 
-    def _get_available_tools_message(self, decision: Optional[ActionDecision] = None) -> str:
+    def _get_runtime_system_messages(
+        self, decision: Optional[ActionDecision] = None
+    ) -> Tuple[str, str]:
+        """组装系统消息，返回 (static_content, dynamic_content) 两部分。
+
+        static: 纯静态提示词（base + prompts），跨轮不变，放在 messages 最前以命中前缀缓存。
+        dynamic: 运行时动态信息（时间/文件系统/自我模型/工具状态/编排），每轮变化，
+                 放在对话历史之后、最新 user 之前。
+        """
         tool_list = self.tool_manager.get_tool_list()
         module_names = self.tool_manager.get_module_list()
         current_task_wrapper = self.task_chain_manager.get_current_task()
@@ -1060,7 +1092,7 @@ class AIAgent:
             recovery_plan=self.last_recovery_plan,
             skill_guidance=skill_guidance,
         )
-        return core_build_available_tools_message(
+        return core_build_runtime_system_messages(
             system_prompt=get_system_prompt(),
             project_root=Path(__file__).parent.resolve(),
             cwd=Path.cwd(),
@@ -1071,6 +1103,15 @@ class AIAgent:
             loaded_single_tools=self.loaded_single_tools,
             orchestration_guidance=orchestration_guidance,
         )
+
+    def _get_available_tools_message(self, decision: Optional[ActionDecision] = None) -> str:
+        """兼容接口：返回 static + dynamic 拼接字符串。
+
+        供 webui 的 token 估算等仍期望接收单个字符串的调用方使用。
+        运行时组装（run_chat_turn）请改用 _get_runtime_system_messages 获取拆分后的两部分。
+        """
+        static_content, dynamic_content = self._get_runtime_system_messages(decision)
+        return static_content + "\n\n" + dynamic_content
 
     def _get_skill_guidance(self, decision: Optional[ActionDecision] = None) -> str:
         return ""
@@ -1269,6 +1310,8 @@ class AIAgent:
         """处理对话（支持排队消息：本轮完成后自动处理队列中的消息）"""
         self._active_user_input = user_input
         self._turn_running = True
+        self._tool_cycle_count = 0  # 每轮开始重置工具递归计数器
+        self._recursion_detector.reset()  # 每轮开始重置指纹检测器
         try:
             self._run_single_turn(user_input, internal_context)
         finally:
@@ -1320,7 +1363,7 @@ class AIAgent:
             prepare_orchestration_decision_fn=self._prepare_orchestration_decision,
             get_actual_context_status_fn=self._get_actual_context_status,
             get_current_tool_names_fn=self._get_current_tool_names,
-            get_available_tools_message_fn=self._get_available_tools_message,
+            get_runtime_system_messages_fn=self._get_runtime_system_messages,
             get_context_token_info_fn=self._get_context_token_info,
             inject_cognitive_network_summary_fn=self._inject_cognitive_network_summary,
             get_recent_failures_fn=self._get_recent_failures,
@@ -1338,6 +1381,7 @@ class AIAgent:
             compact_turn_after_commit_fn=(
                 self._compact_turn_for_next_context if CONTEXT_COMPACT_AFTER_TURN else None
             ),
+            stream_callback_fn=self._stream_callback,
         )
 
     def _chat(self, messages: List[Dict], tools: List[Dict], model: str, _retry_count: int = 0):
@@ -1446,6 +1490,21 @@ class AIAgent:
 
     def _process_streaming_response(self, response, messages: List[Dict], tools: List[Dict]):
         def continue_with_injection(next_messages, next_tools, next_model):
+            self._tool_cycle_count += 1
+            if self._tool_cycle_count > MAX_TOOL_RECURSION_DEPTH:
+                logger.warning("[loop_guard] 工具递归达到上限 (%s)，注入提醒继续执行", MAX_TOOL_RECURSION_DEPTH)
+                self._append_conversation_message(next_messages, {
+                    "role": "assistant",
+                    "content": f"Xenon{MAX_TOOL_RECURSION_DEPTH}次调用了，工具做完了吗？",
+                })
+                # 不 return，继续执行工具链
+            # ★ 内容指纹检测：连续相同工具调用判定为递归死循环
+            if self._recursion_detector.check_and_inject(
+                next_messages,
+                append_message_fn=next_messages.append,
+            ):
+                logger.warning("[recursion_detector] 检测到递归死循环，强制中断工具链")
+                return
             self._try_inject_queued_messages(next_messages)
             self._chat(next_messages, next_tools, next_model)
 
@@ -1504,6 +1563,21 @@ class AIAgent:
 
     def _process_non_streaming_response(self, response, messages: List[Dict], tools: List[Dict]):
         def continue_with_injection(next_messages, next_tools, next_model):
+            self._tool_cycle_count += 1
+            if self._tool_cycle_count > MAX_TOOL_RECURSION_DEPTH:
+                logger.warning("[loop_guard] 工具递归达到上限 (%s)，注入提醒继续执行", MAX_TOOL_RECURSION_DEPTH)
+                self._append_conversation_message(next_messages, {
+                    "role": "assistant",
+                    "content": f"Xenon{MAX_TOOL_RECURSION_DEPTH}次调用了，工具做完了吗？",
+                })
+                # 不 return，继续执行工具链
+            # ★ 内容指纹检测：连续相同工具调用判定为递归死循环
+            if self._recursion_detector.check_and_inject(
+                next_messages,
+                append_message_fn=next_messages.append,
+            ):
+                logger.warning("[recursion_detector] 检测到递归死循环，强制中断工具链")
+                return
             self._try_inject_queued_messages(next_messages)
             self._chat(next_messages, next_tools, next_model)
 
@@ -1727,8 +1801,23 @@ class AIAgent:
 
 
 if __name__ == "__main__":
+    # ── 启动系统级心跳（CLI 模式）──
+    try:
+        from xenon_core.heartbeat import start_heartbeat
+        start_heartbeat(mode="cli")
+    except Exception:
+        pass
+    
     agent = AIAgent()
-    agent.run()
+    try:
+        agent.run()
+    finally:
+        # ── 停止心跳 ──
+        try:
+            from xenon_core.heartbeat import stop_heartbeat
+            stop_heartbeat()
+        except Exception:
+            pass
 
 
 

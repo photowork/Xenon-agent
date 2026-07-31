@@ -75,7 +75,12 @@ def inject_cognitive_network_summary(
         )
     ]
 
-    insert_pos = 0
-    while insert_pos < len(messages) and messages[insert_pos].get("role") == "system":
-        insert_pos += 1
+    # 插入到最后一条 user 消息之前（即对话历史之后、最新 user 之前）。
+    # 这样前缀缓存可以覆盖 [静态提示词 + 完整对话历史] 这段不变的前缀，
+    # COG 作为每轮变化的动态信号放在尾部，紧邻最新 user，既保持对当前输入的影响权重，又不破坏缓存命中。
+    insert_pos = len(messages)
+    for idx in range(len(messages) - 1, -1, -1):
+        if messages[idx].get("role") == "user":
+            insert_pos = idx
+            break
     messages.insert(insert_pos, summary_message)

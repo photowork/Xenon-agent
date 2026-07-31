@@ -312,7 +312,7 @@ def _build_cognitive_state_injection(summary_dir: Optional[Path] = None) -> str:
     try:
         base = Path(summary_dir or get_project_memory_dir()).parent
         from xenon_core.cognitive_network import CognitiveNetworkState
-        builder = CognitiveNetworkState(memory_dir=str(base / "memory_Write"))
+        builder = CognitiveNetworkState()
         cognitive_state = builder.build_summary(max_nodes=6, max_chars=1200)
         if cognitive_state:
             return "\n\nLong-term memory (cognitive network) — use these patterns to inform the checkpoint:\n" + cognitive_state
@@ -581,7 +581,7 @@ def inject_cognitive_state(
         base = Path(summary_dir or get_project_memory_dir()).parent
         from xenon_core.cognitive_network import CognitiveNetworkState
 
-        builder = CognitiveNetworkState(memory_dir=str(base / "memory_Write"))
+        builder = CognitiveNetworkState()
         activation_set = builder.get_activation_set(
             current_query=current_query,
             current_phase=current_phase,

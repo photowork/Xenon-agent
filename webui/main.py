@@ -11,6 +11,11 @@ from typing import Dict, List, Any, Optional
 from contextlib import asynccontextmanager
 from datetime import datetime
 
+
+# ── 运行模式标记（给 restart_handler 用）──
+os.environ['XENON_RUNTIME_MODE'] = 'webui'
+
+
 WEBUI_DIR = Path(__file__).parent.resolve()
 PROJECT_ROOT = WEBUI_DIR.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -26,6 +31,8 @@ from openai import OpenAI
 import uvicorn
 
 from Xenon import AIAgent, AVAILABLE_MODELS, BASE_URL, API_KEY, MODEL, APP_VERSION, MAX_CONTEXT_TOKENS_DEFAULT
+from xenon_core.message_flow import ensure_message_integrity
+from xenon_core.polling_pool import get_pool
 from webui.database import Database
 from webui.stream_adapter import create_stream_adapter
 from xenon_core.runtime_health import (
@@ -243,14 +250,20 @@ def interrupt_session_stream(session_id: str, *, discard_agent: bool = False) ->
 
     stopped = wait_for_session_worker(session_id, agent=agent)
     if discard_agent:
-        if stopped:
-            agent_instances.delete(session_id)
-            agent_locks.delete(session_id)
-        else:
+        # ★ 关键修复：无论 worker 是否在限时内退出，都必须丢弃 agent 实例。
+        # 旧逻辑只在 stopped=True 时删除实例；当 worker 卡在工具执行/网络阻塞中
+        # 超过等待时限时实例被保留，has_pending_worker() 持续为 True，导致后续
+        # 发送永远收到 HTTP 409，只能重启程序。
+        # 丢弃后旧 worker 仅持有旧对象引用，会在 interrupted 检查点自行退出，
+        # 其快照恢复/事件发送均作用于旧对象，与后续新建的 agent 完全隔离。
+        if not stopped:
             logger.warning(
-                "Keeping agent for %s because its worker is still shutting down",
+                "Discarding agent for %s while its worker is still shutting down; "
+                "the orphaned worker will exit at the next interrupt checkpoint",
                 session_id,
             )
+        agent_instances.delete(session_id)
+        agent_locks.delete(session_id)
     return stopped
 
 
@@ -367,6 +380,31 @@ class ModelRequest(BaseModel):
     model: str = Field(..., description="Model name")
 
 
+def _sanitize_loaded_messages(messages: List[Dict[str, Any]], *, label: str, session_id: str) -> List[Dict[str, Any]]:
+    """修复从 db 加载的消息历史，保证发给 API 的 JSON 结构完整。
+
+    覆盖的损坏形态（典型来源：上次回复被强行停止、异常中断时保存了中间态）：
+    - assistant 消息带 tool_calls 但缺少对应 tool 响应 → 补全占位 tool 消息
+      （否则 DeepSeek 返回 400：tool_calls must be followed by tool messages）
+
+    返回修复后的新列表；未做修改时返回原列表（可用 `is` 判断是否变更）。
+    """
+    if not messages:
+        return messages
+    try:
+        fixed = ensure_message_integrity(list(messages), logger=logger)
+    except Exception as error:
+        logger.warning("Failed to sanitize %s for session %s: %s", label, session_id, error)
+        return messages
+    if len(fixed) != len(messages):
+        logger.info(
+            "Sanitized %s for session %s: %d -> %d messages",
+            label, session_id, len(messages), len(fixed),
+        )
+        return fixed
+    return messages
+
+
 def get_or_create_agent(session_id: str) -> Any:
     """获取或创建 agent 实例（线程安全）"""
     session = db.get_session(session_id) or {}
@@ -393,11 +431,23 @@ def get_or_create_agent(session_id: str) -> Any:
             
             context = db.get_context(session_id)
             full_context = db.get_full_context(session_id)
+
+            # ★ 加载即修复：中断/异常可能留下未闭合的 tool_calls（损坏的 JSON 结构），
+            # 直接发给 API 会 400。修复后如有变更回写 db，一次性自愈。
+            sanitized_context = _sanitize_loaded_messages(context, label="context", session_id=session_id)
+            sanitized_full = _sanitize_loaded_messages(full_context, label="full_context", session_id=session_id)
+            if sanitized_context is not context or sanitized_full is not full_context:
+                try:
+                    db.save_session_state(session_id, sanitized_context, sanitized_full)
+                except Exception as save_error:
+                    logger.warning("Failed to persist sanitized context for %s: %s", session_id, save_error)
+            context, full_context = sanitized_context, sanitized_full
+
             if context:
                 wrapped_agent.set_context(context)
             if full_context:
                 wrapped_agent.set_full_context(full_context)
-            
+
             agent_instances.set(session_id, wrapped_agent)
             return wrapped_agent
         apply_agent_model(agent, model)
@@ -414,22 +464,35 @@ async def event_generator(session_id: str, user_input: str, stream_id: Optional[
         with get_stream_lifecycle_lock(session_id):
             active_streams.set(session_id, stream_id)
             running_streams.set(session_id, stream_id)
-    
+
+    logger.info("[event_generator] starting stream_id=%s session=%s", stream_id[:20], session_id[:8])
     agent = None
+    event_count = 0
     try:
         if active_streams.get(session_id) != stream_id:
+            logger.warning(
+                "[event_generator] stream_id mismatch on entry, active=%s my=%s",
+                str(active_streams.get(session_id))[:20], stream_id[:20],
+            )
             yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
             return
 
         agent = await get_or_create_agent_async(session_id)
 
         if active_streams.get(session_id) != stream_id:
+            logger.warning(
+                "[event_generator] stream_id mismatch after get_agent, active=%s my=%s",
+                str(active_streams.get(session_id))[:20], stream_id[:20],
+            )
             yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
             return
 
         async for event in agent.stream_chat_async(user_input):
+            event_count += 1
             if active_streams.get(session_id) != stream_id:
-                logger.info(f"Stream {stream_id} cancelled")
+                logger.info(
+                    "[event_generator] stream cancelled mid-flow (stop button?), events=%d", event_count,
+                )
                 yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
                 break
             
@@ -480,7 +543,10 @@ async def event_generator(session_id: str, user_input: str, stream_id: Optional[
                 )
     
     except Exception as e:
-        logger.error(f"Stream error for session {session_id}: {e}", exc_info=True)
+        logger.error(
+            "[event_generator] stream error session=%s stream=%s events=%d: %s",
+            session_id[:8], stream_id[:20], event_count, e, exc_info=True,
+        )
         if active_streams.get(session_id) != stream_id:
             yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
             return
@@ -495,6 +561,12 @@ async def event_generator(session_id: str, user_input: str, stream_id: Optional[
         yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
     finally:
         # 清理资源
+        logger.info(
+            "[event_generator] cleanup: stream_id=%s events=%d active_match=%s running_match=%s",
+            stream_id[:20], event_count,
+            active_streams.get(session_id) == stream_id,
+            running_streams.get(session_id) == stream_id,
+        )
         if active_streams.get(session_id) == stream_id:
             active_streams.delete(session_id)
         if running_streams.get(session_id) == stream_id:
@@ -519,6 +591,14 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Xenon Web UI...")
     logger.info("\n%s", format_runtime_health_report(collect_runtime_health(project_root=PROJECT_ROOT)))
     
+    # ── 启动系统级心跳 ──
+    try:
+        from xenon_core.heartbeat import start_heartbeat
+        start_heartbeat(project_root=PROJECT_ROOT, mode="webui")
+        logger.info("System heartbeat started (webui mode)")
+    except Exception as e:
+        logger.warning(f"Failed to start heartbeat: {e}")
+    
     prewarm_mode = resolve_webui_prewarm_mode()
     prewarm_task = None
     logger.info(
@@ -542,6 +622,14 @@ async def lifespan(app: FastAPI):
     
     # 关闭时清理所有资源
     logger.info("Shutting down Xenon Web UI...")
+    
+    # ── 停止系统级心跳 ──
+    try:
+        from xenon_core.heartbeat import stop_heartbeat
+        stop_heartbeat()
+        logger.info("System heartbeat stopped")
+    except Exception:
+        pass
     for session_id in agent_instances.get_all_keys():
         try:
             agent = agent_instances.get(session_id)
@@ -675,7 +763,7 @@ async def create_session(request: CreateSessionRequest, background_tasks: Backgr
                 active_streams.delete(evicted_id)
                 running_streams.delete(evicted_id)
                 stream_lifecycle_locks.delete(evicted_id)
-                logger.info("会话数已达上限，自动淘汰最旧会话: %s", evicted_id)
+                logger.debug("会话数已达上限，自动淘汰最旧会话: %s", evicted_id)
         
         session_model = resolve_model(request.model)
         seed_message = request.seed_message or request.title
@@ -1093,6 +1181,20 @@ async def get_session_context(session_id: str):
     except Exception as e:
         logger.error(f"Error getting context for session {session_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/polling/status")
+async def get_polling_status():
+    """获取轮询池状态（待处理消息），给前端显示用"""
+    try:
+        pool = get_pool()
+        pool._load()  # 重新加载文件，同步跨进程的消费状态
+        stats = pool.get_stats()
+        return {
+            "pending_count": stats["pending"],
+        }
+    except Exception:
+        return {"pending_count": 0}
 
 
 def main():
