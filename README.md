@@ -13,7 +13,6 @@
 - **🌐 完整 WebUI** — 浏览器端交互界面，支持流式 SSE 响应、会话管理、工具调用可视化与折叠
 - **📝 代码编辑** — 文件导航、精准定位、安全写入与回退、代码搜索
 - **🔍 网络搜索** — 实时网页搜索与内容抓取
-- **👁️ 视觉识别** — 图像分析与文字识别（⚠️ 含私有 API 配置，未随仓库分发，需自行添加 `Tools/vision_tool.py`）
 - **🗣️ 语音交互** — 语音识别 (ASR) 与语音合成 (TTS)
 - **📄 文档处理** — PDF、Word、Excel、WPS 读写
 - **🔌 SSH** — 远程服务器连接与命令执行
@@ -151,7 +150,6 @@ Xenon 的核心是递归对话架构：每一轮对话开始时会重新加载�
 | 代码编辑 & 导航 | 文件导航、编辑、搜索、智能跳转 | `load_module(['code_editor_handler'])` |
 | 文件管理 | 文件读写、目录操作 | `load_module(['file_manager'])` |
 | 网络搜索 | 搜索引擎查询、内容抓取 | `load_module(['web_search_handler'])` |
-| 视觉识别 | 图像分析、文字识别（⚠️ 含私有 API 配置，未随仓库分发） | 自行添加 `Tools/vision_tool.py` 后 `load_module(['vision_tool'])` |
 | 语音识别 | 语音转文字 | `load_module(['asr_handler'])` |
 | 语音合成 | 文字转语音 | `load_module(['tts_handler'])` |
 | PDF 处理 | PDF 读取、信息提取 | `load_module(['pdf_handler'])` |
